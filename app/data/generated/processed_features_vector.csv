@@ -1,2 +1,2 @@
 source_id,avg_daily_balance,balance_volatility,credit_debit_ratio,monthly_credit,monthly_debit,tx_velocity,max_drawdown_pct,large_tx_pct,irregular_gap_score,net_flow_ratio,liquidity_runway_days,selected_by_variance
-account_aggregator,124911.82545454545,0.1004,0.5391,12485.666666666666,23162.273333333334,0.3667,0.1201,0.3333,0.2169,-0.8551,161.8,"balance_volatility,credit_debit_ratio,max_drawdown_pct,large_tx_pct,irregular_gap_score,net_flow_ratio"
+account_aggregator,124923.94666666667,0.1003,0.5445,12485.666666666666,22928.940000000002,0.3667,0.1201,0.3636,0.232,-0.8364,163.4,"balance_volatility,credit_debit_ratio,max_drawdown_pct,large_tx_pct,irregular_gap_score,net_flow_ratio"

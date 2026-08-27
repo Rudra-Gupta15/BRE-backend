@@ -49,9 +49,11 @@ _SYSTEM_PROMPT = (
 )
 
 _USER_PROMPT = (
-    "Extract every transaction visible in this bank statement image.\n\n"
+    "Extract the account details and every transaction visible in this bank statement image.\n\n"
     "Return ONLY a JSON object with this exact structure:\n"
     "{\n"
+    "  \"bank_name\": \"<name of the bank, e.g. 'HDFC Bank', or null>\",\n"
+    "  \"account_holder\": \"<full name of the account holder, or null>\",\n"
     "  \"opening_balance\": <number or null>,\n"
     "  \"closing_balance\": <number or null>,\n"
     "  \"transactions\": [\n"
@@ -65,6 +67,7 @@ _USER_PROMPT = (
     "  ]\n"
     "}\n\n"
     "Rules:\n"
+    "- bank_name / account_holder usually appear only in the header of the first page.\n"
     "- If the amount column is split into separate debit/credit columns, "
     "use whichever has a value and set type accordingly.\n"
     "- Ignore header rows, footer rows, totals rows, and page numbers.\n"
@@ -86,11 +89,23 @@ def _empty_result() -> dict:
             "closingBalance":   None,
             "minBalance":       None,
             "maxBalance":       None,
+            "bankName":         None,
+            "accountHolder":    None,
         },
     }
 
 
-def _summarize_llm(transactions: list[dict], opening: float | None, closing: float | None) -> dict:
+def _clean_name(value) -> str | None:
+    if not value or not isinstance(value, str):
+        return None
+    s = re.sub(r"\s+", " ", value.strip()).strip(" .:-")
+    return s[:80] or None
+
+
+def _summarize_llm(
+    transactions: list[dict], opening: float | None, closing: float | None,
+    bank_name: str | None = None, account_holder: str | None = None,
+) -> dict:
     total_debit  = round(sum(t["amount"] for t in transactions if t.get("type") == "DEBIT"),  2)
     total_credit = round(sum(t["amount"] for t in transactions if t.get("type") == "CREDIT"), 2)
     balances     = [t["balance"] for t in transactions if isinstance(t.get("balance"), (int, float))]
@@ -104,6 +119,8 @@ def _summarize_llm(transactions: list[dict], opening: float | None, closing: flo
             "closingBalance":   closing if closing is not None else (balances[-1] if balances else None),
             "minBalance":       min(balances) if balances else None,
             "maxBalance":       max(balances) if balances else None,
+            "bankName":         _clean_name(bank_name),
+            "accountHolder":    _clean_name(account_holder),
         },
     }
 
@@ -198,6 +215,8 @@ def _llm_vision_extraction(doc) -> dict:
     all_transactions: list[dict] = []
     opening_balance: float | None = None
     closing_balance: float | None = None
+    bank_name: str | None = None
+    account_holder: str | None = None
 
     for page_num, page in enumerate(doc):
         logger.info("LLM scanning PDF page %d / %d …", page_num + 1, len(doc))
@@ -208,6 +227,11 @@ def _llm_vision_extraction(doc) -> dict:
         if not page_data:
             logger.warning("Page %d: LLM returned no data, skipping.", page_num + 1)
             continue
+
+        if not bank_name and page_data.get("bank_name"):
+            bank_name = str(page_data["bank_name"])
+        if not account_holder and page_data.get("account_holder"):
+            account_holder = str(page_data["account_holder"])
 
         if opening_balance is None and page_data.get("opening_balance") is not None:
             try:
@@ -244,7 +268,7 @@ def _llm_vision_extraction(doc) -> dict:
 
     if not all_transactions:
         return _empty_result()
-    return _summarize_llm(all_transactions, opening_balance, closing_balance)
+    return _summarize_llm(all_transactions, opening_balance, closing_balance, bank_name, account_holder)
 
 
 def _parse_pdf_statement(buf: bytes) -> dict:
@@ -299,6 +323,33 @@ def _find_labeled_amount(text: str, labels: list[str]):
     return None
 
 
+_BANK_RE = re.compile(
+    r"\b([A-Z][A-Za-z&.]+(?:\s+[A-Z][A-Za-z&.]+){0,3}\s+bank)\b"
+    r"|\b(HDFC|ICICI|SBI|AXIS|KOTAK|YES|IDFC|INDUSIND|PNB|BOB|CANARA|UNION|RBL|AU|BANDHAN|FEDERAL|IDBI)\b",
+    re.IGNORECASE,
+)
+_HOLDER_RE = re.compile(
+    r"(?:account\s*holder|customer\s*name|name\s*of\s*(?:account\s*holder|customer)|a/c\s*holder|holder\s*name)"
+    r"\s*[:\-]?\s*([A-Za-z][A-Za-z .]{2,60})",
+    re.IGNORECASE,
+)
+
+
+def _extract_account_meta(raw_text: str) -> tuple[str | None, str | None]:
+    head = raw_text[:1500]  # header info is near the top
+    bank = None
+    m = _BANK_RE.search(head)
+    if m:
+        bank = _clean_name(m.group(1) or m.group(2))
+        if bank and len(bank) <= 6 and "bank" not in bank.lower():
+            bank = f"{bank.upper()} Bank"
+    holder = None
+    mh = _HOLDER_RE.search(head)
+    if mh:
+        holder = _clean_name(mh.group(1))
+    return bank, holder
+
+
 def _summarize(transactions: list[dict], raw_text: str) -> dict:
     total_debit  = round(sum(t["amount"] for t in transactions if t["type"] == "DEBIT"), 2)
     total_credit = round(sum(t["amount"] for t in transactions if t["type"] == "CREDIT"), 2)
@@ -309,6 +360,7 @@ def _summarize(transactions: list[dict], raw_text: str) -> dict:
     balances        = [t["balance"] for t in transactions if isinstance(t.get("balance"), (int, float))]
     opening_balance = labeled_opening if labeled_opening is not None else (balances[0]  if balances else None)
     closing_balance = labeled_closing if labeled_closing is not None else (balances[-1] if balances else None)
+    bank_name, account_holder = _extract_account_meta(raw_text)
 
     return {
         "transactions": transactions,
@@ -320,6 +372,8 @@ def _summarize(transactions: list[dict], raw_text: str) -> dict:
             "closingBalance":   closing_balance,
             "minBalance":       min(balances) if balances else None,
             "maxBalance":       max(balances) if balances else None,
+            "bankName":         bank_name,
+            "accountHolder":    account_holder,
         },
     }
 
@@ -329,8 +383,17 @@ def _parse_csv_statement(text: str) -> dict:
     if len(lines) < 2:
         return _empty_result()
 
-    delimiter = "\t" if "\t" in lines[0] else ","
-    header    = [h.strip().lower() for h in lines[0].split(delimiter)]
+    # Skip any preamble rows (bank name, account holder, period …) and find the
+    # real column-header row: the first line mentioning "date" plus an amount col.
+    header_i = 0
+    for i, line in enumerate(lines[:15]):
+        low = line.lower()
+        if "date" in low and any(k in low for k in ("debit", "credit", "withdrawal", "deposit", "amount", "balance")):
+            header_i = i
+            break
+
+    delimiter = "\t" if "\t" in lines[header_i] else ","
+    header    = [h.strip().lower() for h in lines[header_i].split(delimiter)]
 
     def find_col(keywords: list[str]) -> int:
         for i, h in enumerate(header):
@@ -354,7 +417,7 @@ def _parse_csv_statement(text: str) -> dict:
             return None
 
     transactions = []
-    for line in lines[1:]:
+    for line in lines[header_i + 1:]:
         cells  = [c.strip() for c in line.split(delimiter)]
         if len(cells) < 2:
             continue

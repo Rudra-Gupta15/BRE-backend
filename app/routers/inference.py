@@ -40,6 +40,14 @@ def _build_bundle(model_id: str, custom_id: str, bank_name: str, source_id: str 
     real_statement = session_state.parsed_statements.get(source_id) if source_id else None
     has_real_data = bool(real_statement and real_statement["transactions"])
 
+    stmt_summary = real_statement.get("summary", {}) if has_real_data else {}
+    # Prefer what the user typed; else use what was read off the statement.
+    effective_bank = (bank_name or "").strip() or stmt_summary.get("bankName") or ""
+    account_holder = stmt_summary.get("accountHolder")
+    effective_id = custom_id
+    if custom_id in ("applicant", "") and account_holder:
+        effective_id = account_holder
+
     transactions = map_real_transactions(real_statement) if has_real_data else generate_transactions(custom_id)
     evaluation = generate_evaluation(custom_id, model_id)
 
@@ -66,7 +74,7 @@ def _build_bundle(model_id: str, custom_id: str, bank_name: str, source_id: str 
     )
 
     bre_payload = generate_bre_payload(
-        custom_id, bank_name, model["name"], version, transactions,
+        effective_id, effective_bank, model["name"], version, transactions,
         real_feature_vector=real_feature_vector,
         real_risk_score=risk_score,
     )
@@ -74,7 +82,9 @@ def _build_bundle(model_id: str, custom_id: str, bank_name: str, source_id: str 
     return {
         "model": {"id": model["id"], "name": model["name"], "version": version},
         "customId": custom_id,
-        "bankName": bank_name or None,
+        "bankName": effective_bank or None,
+        "accountHolder": account_holder,
+        "statementLabel": effective_id if effective_id != "applicant" else None,
         "dataSource": "UPLOADED_STATEMENT" if has_real_data else "SIMULATED",
         "transactions": transactions,
         "anomalies": anomalies,
