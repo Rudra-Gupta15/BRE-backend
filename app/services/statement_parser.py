@@ -16,26 +16,26 @@ import asyncio
 import base64
 import json
 import logging
-import os
 import re
 import urllib.error
 import urllib.request
 
 import pymupdf as fitz  # PyMuPDF (1.28+ uses pymupdf instead of fitz)
 
+from app import config
+
 logger = logging.getLogger(__name__)
 
-# ── Ollama vision-LLM config ────────────────────────────────────────────────
+# ── Ollama vision-LLM config (set these in Backend/.env) ────────────────────
 # gemma4:31b-cloud runs on Ollama Cloud — accurate table reading, ~3-5s/page,
-# and zero load on the local machine. Override with STATEMENT_LLM_MODEL
-# (e.g. "qwen2.5vl:3b" for a fully-local model).
-OLLAMA_HOST    = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
-OLLAMA_MODEL   = os.environ.get("STATEMENT_LLM_MODEL", "gemma4:31b-cloud")
-OLLAMA_TIMEOUT = int(os.environ.get("STATEMENT_LLM_TIMEOUT", "120"))  # seconds per page
+# and zero load on the local machine. Set STATEMENT_LLM_MODEL=qwen2.5vl:3b in
+# .env for a fully-local model.
+OLLAMA_HOST    = config.OLLAMA_HOST
+OLLAMA_MODEL   = config.STATEMENT_LLM_MODEL
+OLLAMA_TIMEOUT = config.STATEMENT_LLM_TIMEOUT      # seconds per page
 
-# ── Page render resolution ──────────────────────────────────────────────────
-# Only used for scanned/image PDFs that fall through to the vision LLM.
-PAGE_DPI = int(os.environ.get("STATEMENT_LLM_DPI", "150"))
+# Page render resolution — only used for scanned/image PDFs that reach the LLM.
+PAGE_DPI = config.STATEMENT_LLM_DPI
 
 # Minimum transactions text-extraction must find before we skip the LLM.
 # Fewer than this → assume a scanned PDF and fall back to vision.

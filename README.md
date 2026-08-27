@@ -11,13 +11,19 @@ cd Backend
 python -m venv venv
 ./venv/Scripts/activate        # Windows PowerShell: .\venv\Scripts\Activate.ps1
 pip install -r requirements.txt
-cp .env.example .env           # optional: change PORT / CORS_ORIGIN
-uvicorn app.main:app --reload --port 4000
+cp .env.example .env           # set PORT, CORS_ORIGIN, PostgreSQL, Ollama model
+python -m app                  # reads PORT from .env  (or: uvicorn app.main:app --reload --port 4000)
 ```
 
-Interactive API docs are auto-generated at `http://localhost:4000/docs` (Swagger UI) once running.
+All config lives in `.env` (loaded by `app/config.py`): `PORT`, `CORS_ORIGIN`,
+the `INVENTORY_PG_*` PostgreSQL vars, and `STATEMENT_LLM_MODEL` / `OLLAMA_HOST` /
+`STATEMENT_LLM_TIMEOUT` / `STATEMENT_LLM_DPI` for the bank-statement vision LLM.
+PostgreSQL is optional — with no `INVENTORY_PG_HOST` the app runs fully in-memory.
 
-The Frontend dev server runs on `http://localhost:5173` by default and proxies `/api/*` to `http://localhost:4000` (see `Frontend/vite.config.js`) — no frontend changes are needed to use this backend; the JSON contract is identical to the previous Node implementation.
+Interactive API docs are auto-generated at `http://localhost:<PORT>/docs` (Swagger UI) once running.
+
+The Frontend dev server URL and its backend proxy target come from `Frontend/.env`
+(`VITE_PORT`, `VITE_BACKEND_URL`).
 
 ## Project Structure
 
