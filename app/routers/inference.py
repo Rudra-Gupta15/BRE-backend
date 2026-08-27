@@ -5,6 +5,7 @@ from pydantic import BaseModel
 
 from app.data.model_catalog import MODEL_TEMPLATES
 from app.services.inference_engine import (
+    apply_rule_engine,
     compute_credit_score,
     compute_real_credit_score,
     compute_real_feature_vector,
@@ -43,19 +44,21 @@ def _build_bundle(model_id: str, custom_id: str, bank_name: str, source_id: str 
 
     real_feature_vector = compute_real_feature_vector(real_statement) if has_real_data else None
     risk_score = compute_real_credit_score(real_feature_vector) if has_real_data else compute_credit_score(custom_id)
+    risk_score = apply_rule_engine(risk_score)
 
-    # Anchored to the same real_feature_vector/risk_score as everything else
-    # below, so this chart can't disagree with the Credit Score / BRE tabs.
+    # Always pass the (possibly rule-gated) risk_score through, for both real
+    # and simulated data — otherwise the analytics chart / BRE payload would
+    # recompute their own ungated score and disagree with the Credit Score tab.
     analytics = generate_analytics(
         custom_id, model_id, version,
-        real_risk_score=risk_score if has_real_data else None,
+        real_risk_score=risk_score,
         real_feature_vector=real_feature_vector,
     )
 
     bre_payload = generate_bre_payload(
         custom_id, bank_name, model["name"], version, transactions,
         real_feature_vector=real_feature_vector,
-        real_risk_score=risk_score if has_real_data else None,
+        real_risk_score=risk_score,
     )
 
     return {

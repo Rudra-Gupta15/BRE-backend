@@ -4,7 +4,9 @@ from datetime import date
 
 from app.data.applicant_templates import ANOMALY_REASONS, MODEL_ANALYTICS_META, MONTHS, TRANSACTION_TEMPLATES
 from app.data.model_catalog import MODEL_TEMPLATES
+from app.data.underwriting_rules import CREDIT_SCORE_GATE_RULE_ID, CREDIT_SCORE_GATE_THRESHOLD
 from app.services.rng import create_rng, pick, rand_int, rand_range
+from app.state.settings_state import settings_state
 
 
 def inr(n: float) -> str:
@@ -25,6 +27,30 @@ def decision_for_grade(grade: str) -> str:
     if grade == "MEDIUM":
         return "CONDITIONAL APPROVAL"
     return "REJECTED"
+
+
+def apply_rule_engine(risk: dict) -> dict:
+    """Overlays whichever BRE rules are actually enabled (see Settings page)
+    on top of the raw score. Right now the Credit Score Gate is the only
+    rule wired to a real computation — everything else in
+    underwriting_rules.py is descriptive only and doesn't affect the
+    decision. When the gate is on (its default state), it replaces the
+    3-tier LOW/MEDIUM/HIGH grading with a hard binary cutoff: score above
+    the threshold passes, at-or-below it is rejected — nothing in between."""
+    if not settings_state.enabled_rules.get(CREDIT_SCORE_GATE_RULE_ID):
+        return risk
+
+    passed = risk["score"] > CREDIT_SCORE_GATE_THRESHOLD
+    return {
+        **risk,
+        "grade": "LOW" if passed else "HIGH",
+        "decision": "APPROVED" if passed else "REJECTED",
+        "gateRule": {
+            "id": CREDIT_SCORE_GATE_RULE_ID,
+            "threshold": CREDIT_SCORE_GATE_THRESHOLD,
+            "passed": passed,
+        },
+    }
 
 
 def compute_credit_score(custom_id: str) -> dict:

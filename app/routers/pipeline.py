@@ -119,7 +119,15 @@ async def run_pipeline_handler(body: RunPipelineBody):
         "lastRunAt": result["completedAt"],
     }
 
-    return {"pipeline": session_state.pipeline, "stages": result["stages"], "logs": result["logs"], "storedFile": result["storedFile"]}
+    return {
+        "pipeline": session_state.pipeline,
+        "stages": result["stages"],
+        "storedFile": result["storedFile"],
+        "selectedFeatures": result["selectedFeatures"],
+        "normalizeTable": result["normalizeTable"],
+        "engineeredTable": result["engineeredTable"],
+        "selectionTable": result["selectionTable"],
+    }
 
 
 @router.get("/status")

@@ -12,6 +12,7 @@
 # CSV/TSV/TXT flow (unchanged):
 #   Column-based heuristic parser — works fine for structured text files.
 
+import asyncio
 import base64
 import json
 import logging
@@ -458,7 +459,12 @@ async def parse_statement(buf: bytes, file_name: str) -> dict:
         if ext in ("csv", "tsv", "txt"):
             return _parse_csv_statement(buf.decode("utf-8", errors="replace"))
         if ext == "pdf":
-            return _parse_pdf_statement(buf)
+            # _parse_pdf_statement does blocking PDF rendering + a blocking
+            # urllib call to Ollama (up to 90s/page). Running it inline would
+            # freeze the whole asyncio event loop — and with it every other
+            # endpoint in the app — for the entire scan. Push it to a worker
+            # thread so the rest of the API stays responsive.
+            return await asyncio.to_thread(_parse_pdf_statement, buf)
     except Exception as err:  # noqa: BLE001
         logger.exception("Statement parse failed for %s", file_name)
         result = _empty_result()
