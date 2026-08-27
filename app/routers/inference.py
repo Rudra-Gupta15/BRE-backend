@@ -5,6 +5,7 @@ from pydantic import BaseModel
 
 from app.data.model_catalog import MODEL_TEMPLATES
 from app.services.bre_engine import evaluate_bre_rules
+from app.services.persistence import save_bre_evaluation, save_inference_run
 from app.services.inference_engine import (
     apply_rule_engine,
     compute_credit_score,
@@ -121,6 +122,7 @@ async def run_inference(body: RunInferenceBody):
         raise HTTPException(400, "customId is required.")
 
     bundle = _build_bundle(body.modelId, body.customId.strip(), body.bankName.strip(), body.sourceId or None)
+    save_inference_run(bundle, body.sourceId or None)
 
     session_state.inference_history.insert(0, {
         "id": bundle["customId"],
@@ -172,6 +174,7 @@ async def run_bre_rules(body: BreRulesBody):
         fv, risk, real_statement["transactions"], opening_balance, settings_state.enabled_rules,
     )
     result["available"] = True
+    save_bre_evaluation(result, body.sourceId or None)
     return result
 
 

@@ -1,6 +1,7 @@
 fastapi==0.115.6
 uvicorn[standard]==0.34.0
 python-multipart==0.0.20
+python-dotenv==1.0.1
 pypdf==5.1.0
 pymupdf==1.28.2
 
@@ -8,3 +9,7 @@ pymupdf==1.28.2
 numpy==2.5.2
 scikit-learn==1.9.0
 scipy==1.18.1
+
+# PostgreSQL persistence (optional — only used when DATABASE_URL is set)
+SQLAlchemy==2.0.52
+psycopg[binary]==3.3.4

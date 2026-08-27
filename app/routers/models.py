@@ -7,6 +7,7 @@ from pydantic import BaseModel
 
 from app.data.model_catalog import ML_ALGORITHMS, VERSION_OPTIONS
 from app.services.ml_trainer import train_models_live
+from app.services.persistence import save_model_run
 from app.state.models_state import known_model_ids, models_state
 from app.state.session_state import session_state
 
@@ -47,6 +48,8 @@ async def train_models_handler(body: TrainBody):
     models_state.real_features       = result["realFeatures"]
     models_state.trained_models      = result["models"]
     models_state.evaluation_cache    = result.get("evaluations", {})
+
+    save_model_run({**result, "datasetFile": body.datasetFile})
     models_state.last_training_run   = {
         "algorithm":   body.algorithm,
         "datasetFile": body.datasetFile,

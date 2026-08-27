@@ -4,6 +4,7 @@ from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel
 
 from app.services.file_analysis import analyze_file
+from app.services.persistence import save_statement
 from app.services.pipeline_engine import run_pipeline
 from app.services.statement_parser import parse_statement
 from app.state.session_state import session_state
@@ -64,7 +65,14 @@ async def upload_file(sourceId: str = Form(...), file: UploadFile = File(...)):
     session_state.parsed_statements[sourceId] = parsed
     session_state.persist()
 
-    return {"uploadedFiles": session_state.uploaded_files, "analysis": analysis, "statement": parsed}
+    statement_id = save_statement(sourceId, analysis, parsed)
+
+    return {
+        "uploadedFiles": session_state.uploaded_files,
+        "analysis": analysis,
+        "statement": parsed,
+        "statementId": statement_id,
+    }
 
 
 

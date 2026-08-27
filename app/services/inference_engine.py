@@ -83,10 +83,6 @@ def generate_transactions(custom_id: str, count: int = 12) -> list[dict]:
             "narration": tpl["narration"],
             "type": tpl["type"],
             "amount": f"{amount:.2f}",
-            "category": tpl["category"],
-            "merchant": "-",
-            "stage": "RULE",
-            "confidence": rand_int(rng, 88, 99),
         })
     return sorted(txs, key=lambda t: t["date"])
 
@@ -138,17 +134,11 @@ def map_real_transactions(parsed: dict) -> list[dict]:
     """Maps a real parsed statement's transactions into the shape the UI renders."""
     result = []
     for t in parsed["transactions"]:
-        narration = t["narration"]
-        category = "Bounce" if BOUNCE_RE.search(narration) else "Cash Withdrawal" if CASH_RE.search(narration) else "Other"
         result.append({
             "date": t.get("date") or "",
-            "narration": narration,
+            "narration": t["narration"],
             "type": t["type"],
             "amount": f"{t['amount']:.2f}",
-            "category": category,
-            "merchant": "-",
-            "stage": "REAL",
-            "confidence": 100,
         })
     return result
 

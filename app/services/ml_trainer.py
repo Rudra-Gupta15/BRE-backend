@@ -17,7 +17,6 @@
 #   5. Saves trained model objects in memory on session_state for inference.
 
 import logging
-import math
 from datetime import datetime
 
 import numpy as np

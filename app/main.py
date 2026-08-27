@@ -1,7 +1,10 @@
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import CORS_ORIGIN
+from app.db import init_db
 from app.routers import (
     ai_architecture,
     auth,
@@ -14,7 +17,13 @@ from app.routers import (
     system,
 )
 
-app = FastAPI(title="SFL BRE Portal API")
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    init_db()  # connects to PostgreSQL if DATABASE_URL is set; no-op otherwise
+    yield
+
+
+app = FastAPI(title="SFL BRE Portal API", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
