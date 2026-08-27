@@ -32,6 +32,7 @@ class SelectionBody(BaseModel):
 async def set_selection(body: SelectionBody):
     valid_ids = {s["id"] for s in session_state.all_data_sources()}
     session_state.selected_ids = [i for i in body.selectedIds if i in valid_ids]
+    session_state.persist()
     return {"selectedIds": session_state.selected_ids}
 
 
@@ -70,6 +71,7 @@ async def add_data_source(body: AddSourceBody):
     }
 
     session_state.custom_sources.append(new_source)
+    session_state.persist()
     return {"dataSource": new_source}
 
 

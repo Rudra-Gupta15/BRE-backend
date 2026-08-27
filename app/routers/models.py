@@ -46,6 +46,7 @@ async def train_models_handler(body: TrainBody):
     models_state.trained_sklearn_map = result["trainedMap"]
     models_state.real_features       = result["realFeatures"]
     models_state.trained_models      = result["models"]
+    models_state.evaluation_cache    = result.get("evaluations", {})
     models_state.last_training_run   = {
         "algorithm":   body.algorithm,
         "datasetFile": body.datasetFile,

@@ -2,3 +2,9 @@ fastapi==0.115.6
 uvicorn[standard]==0.34.0
 python-multipart==0.0.20
 pypdf==5.1.0
+pymupdf==1.28.2
+
+# ML training / evaluation (Model Hub + Model Evaluation tab)
+numpy==2.5.2
+scikit-learn==1.9.0
+scipy==1.18.1

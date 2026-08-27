@@ -4,6 +4,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from app.data.model_catalog import MODEL_TEMPLATES
+from app.services.bre_engine import evaluate_bre_rules
 from app.services.inference_engine import (
     apply_rule_engine,
     compute_credit_score,
@@ -18,6 +19,7 @@ from app.services.inference_engine import (
 )
 from app.state.models_state import known_model_ids, models_state
 from app.state.session_state import session_state
+from app.state.settings_state import settings_state
 
 router = APIRouter(prefix="/inference", tags=["inference"])
 
@@ -39,8 +41,15 @@ def _build_bundle(model_id: str, custom_id: str, bank_name: str, source_id: str 
     has_real_data = bool(real_statement and real_statement["transactions"])
 
     transactions = map_real_transactions(real_statement) if has_real_data else generate_transactions(custom_id)
-    anomalies = generate_anomalies(custom_id, transactions)
     evaluation = generate_evaluation(custom_id, model_id)
+
+    if has_real_data:
+        opening_balance = (real_statement.get("summary") or {}).get("openingBalance")
+        anomalies = generate_anomalies(
+            custom_id, real_statement["transactions"], real=True, opening_balance=opening_balance,
+        )
+    else:
+        anomalies = generate_anomalies(custom_id, transactions)
 
     real_feature_vector = compute_real_feature_vector(real_statement) if has_real_data else None
     risk_score = compute_real_credit_score(real_feature_vector) if has_real_data else compute_credit_score(custom_id)
@@ -53,6 +62,7 @@ def _build_bundle(model_id: str, custom_id: str, bank_name: str, source_id: str 
         custom_id, model_id, version,
         real_risk_score=risk_score,
         real_feature_vector=real_feature_vector,
+        real_statement=real_statement if has_real_data else None,
     )
 
     bre_payload = generate_bre_payload(
@@ -88,7 +98,7 @@ async def list_deployed_models():
 
 class RunInferenceBody(BaseModel):
     modelId: str = "risk_model"
-    customId: str = "cust_demo_medium_1"
+    customId: str = "applicant"
     bankName: str = ""
     sourceId: str = ""
 
@@ -117,7 +127,7 @@ async def run_inference(body: RunInferenceBody):
 
 
 class ReEvaluateBody(BaseModel):
-    customId: str = "cust_demo_medium_1"
+    customId: str = "applicant"
 
 
 @router.post("/evaluate/{model_id}")
@@ -125,6 +135,34 @@ async def re_evaluate(model_id: str, body: ReEvaluateBody):
     if model_id not in known_model_ids():
         raise HTTPException(404, f"Unknown model '{model_id}'.")
     return generate_evaluation(f"{body.customId}:{datetime.now().timestamp()}", model_id)
+
+
+class BreRulesBody(BaseModel):
+    customId: str = "applicant"
+    sourceId: str = ""
+
+
+@router.post("/bre-rules")
+async def run_bre_rules(body: BreRulesBody):
+    """Evaluates every BRE rule currently enabled on the Settings page against
+    the applicant's real uploaded statement + derived feature vector + credit
+    score, returning PASS / FAIL / SKIP per rule and an overall decision."""
+    real_statement = session_state.parsed_statements.get(body.sourceId) if body.sourceId else None
+    if not (real_statement and real_statement.get("transactions")):
+        return {
+            "available": False,
+            "message": "Upload a bank statement first — BRE rules run against real transaction data.",
+        }
+
+    fv = compute_real_feature_vector(real_statement)
+    risk = apply_rule_engine(compute_real_credit_score(fv))
+    opening_balance = (real_statement.get("summary") or {}).get("openingBalance")
+
+    result = evaluate_bre_rules(
+        fv, risk, real_statement["transactions"], opening_balance, settings_state.enabled_rules,
+    )
+    result["available"] = True
+    return result
 
 
 @router.get("/history")

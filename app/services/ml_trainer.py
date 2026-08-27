@@ -21,6 +21,7 @@ import math
 from datetime import datetime
 
 import numpy as np
+from sklearn.base import clone
 from sklearn.ensemble import (
     GradientBoostingClassifier,
     GradientBoostingRegressor,
@@ -29,7 +30,17 @@ from sklearn.ensemble import (
     RandomForestRegressor,
 )
 from sklearn.linear_model import LogisticRegression, Ridge
-from sklearn.model_selection import cross_val_score
+from sklearn.metrics import (
+    accuracy_score,
+    brier_score_loss,
+    f1_score,
+    mean_absolute_error,
+    mean_squared_error,
+    precision_score,
+    r2_score,
+    recall_score,
+)
+from sklearn.model_selection import KFold, StratifiedKFold, cross_val_score
 from sklearn.preprocessing import StandardScaler
 from sklearn.svm import SVC, SVR
 
@@ -277,6 +288,157 @@ def _isolation_accuracy(model: IsolationForest, X: np.ndarray) -> float:
     return round(88 + (normal_pct - 0.80) / 0.20 * 11, 1)
 
 
+# ── Real cross-validation evaluation ─────────────────────────────────────────
+
+def _status(fold_val: float, mean_val: float, tol: float) -> str:
+    return "PASSED" if abs(fold_val - mean_val) <= tol else "REVIEW"
+
+
+def _pack(metrics: dict, folds: list[dict], labels: dict) -> dict:
+    return {"evalMetrics": {**metrics, "metricMeta": labels}, "cvFolds": folds}
+
+
+def evaluate_trained(algorithm: str, X_sc: np.ndarray, labels: dict) -> dict:
+    """Runs a real, honest 5-fold cross-validation for each trained model and
+    returns per-model {evalMetrics, cvFolds}. Uses fresh (cloned) estimators
+    refit on each training fold — nothing is jittered or hardcoded.
+
+    Metric slots are shared across model types, so `metricMeta` carries the
+    correct human label for the slot given this model's task (accuracy for a
+    classifier goes in the R² slot, etc.)."""
+    estimators = _get_estimators(algorithm)
+    out: dict = {}
+
+    # ── Risk Model — binary classifier ───────────────────────────────────────
+    y = labels["risk_label"]
+    skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+    acc, prec, rec, f1, brier = [], [], [], [], []
+    for tr, te in skf.split(X_sc, y):
+        est = clone(estimators["risk"]).fit(X_sc[tr], y[tr])
+        pred = est.predict(X_sc[te])
+        proba = est.predict_proba(X_sc[te])[:, 1] if hasattr(est, "predict_proba") else pred
+        acc.append(accuracy_score(y[te], pred))
+        prec.append(precision_score(y[te], pred, zero_division=0))
+        rec.append(recall_score(y[te], pred, zero_division=0))
+        f1.append(f1_score(y[te], pred, zero_division=0))
+        brier.append(brier_score_loss(y[te], proba) if len(set(y[te])) > 1 else 0.0)
+    m_acc, m_brier = float(np.mean(acc)), float(np.mean(brier))
+    folds = [
+        {
+            "fold": f"Fold {i + 1}", "r2": f"{acc[i]:.3f}", "mse": f"{brier[i]:.4f}",
+            "precision": f"{prec[i] * 100:.1f}%", "recall": f"{rec[i] * 100:.1f}%",
+            "mae": f"{1 - acc[i]:.4f}", "status": _status(acc[i], m_acc, 0.05),
+        }
+        for i in range(5)
+    ]
+    out["risk_model"] = _pack(
+        {
+            "r2Score": f"{m_acc:.3f}", "mse": f"{m_brier:.4f}",
+            "precision": f"{np.mean(prec) * 100:.1f}%", "recall": f"{np.mean(rec) * 100:.1f}%",
+            "mae": f"{1 - m_acc:.4f}", "f1Score": f"{np.mean(f1):.3f}",
+        },
+        folds,
+        {
+            "r2Score": {"name": "ACCURACY", "sub": "Correct predictions (5-fold CV)"},
+            "mse": {"name": "BRIER SCORE", "sub": "Probability calibration error"},
+            "mae": {"name": "ERROR RATE", "sub": "1 − accuracy"},
+            "precision": {"name": "PRECISION", "sub": "Positive predictive value"},
+            "recall": {"name": "RECALL", "sub": "Sensitivity / true positive rate"},
+            "f1Score": {"name": "F1 SCORE", "sub": "Harmonic mean of P & R"},
+            "cvTitle": "5-Fold Stratified Cross Validation — real refit per fold",
+        },
+    )
+
+    # ── Cashflow & Money Balance — regressors ────────────────────────────────
+    for model_id, est_key, y_key in (
+        ("cashflow_model", "cash", "cashflow_score"),
+        ("money_balance_model", "balance", "balance_score"),
+    ):
+        yv = labels[y_key]
+        thr = float(np.median(yv))
+        kf = KFold(n_splits=5, shuffle=True, random_state=42)
+        r2s, mses, maes, prec, rec, f1 = [], [], [], [], [], []
+        for tr, te in kf.split(X_sc):
+            est = clone(estimators[est_key]).fit(X_sc[tr], yv[tr])
+            pred = est.predict(X_sc[te])
+            r2s.append(r2_score(yv[te], pred))
+            mses.append(mean_squared_error(yv[te], pred))
+            maes.append(mean_absolute_error(yv[te], pred))
+            prec.append(precision_score(yv[te] > thr, pred > thr, zero_division=0))
+            rec.append(recall_score(yv[te] > thr, pred > thr, zero_division=0))
+            f1.append(f1_score(yv[te] > thr, pred > thr, zero_division=0))
+        m_r2 = float(np.mean(r2s))
+        folds = [
+            {
+                "fold": f"Fold {i + 1}", "r2": f"{r2s[i]:.3f}", "mse": f"{mses[i]:.4f}",
+                "precision": f"{prec[i] * 100:.1f}%", "recall": f"{rec[i] * 100:.1f}%",
+                "mae": f"{maes[i]:.4f}", "status": _status(r2s[i], m_r2, 0.08),
+            }
+            for i in range(5)
+        ]
+        out[model_id] = _pack(
+            {
+                "r2Score": f"{m_r2:.3f}", "mse": f"{np.mean(mses):.4f}",
+                "precision": f"{np.mean(prec) * 100:.1f}%", "recall": f"{np.mean(rec) * 100:.1f}%",
+                "mae": f"{np.mean(maes):.4f}", "f1Score": f"{np.mean(f1):.3f}",
+            },
+            folds,
+            {
+                "r2Score": {"name": "R² SCORE", "sub": "Variance explained (5-fold CV)"},
+                "mse": {"name": "MSE", "sub": "Mean squared error"},
+                "mae": {"name": "MAE", "sub": "Mean absolute error"},
+                "precision": {"name": "PRECISION", "sub": "vs. median-split target"},
+                "recall": {"name": "RECALL", "sub": "vs. median-split target"},
+                "f1Score": {"name": "F1 SCORE", "sub": "vs. median-split target"},
+                "cvTitle": "5-Fold Cross Validation — real refit per fold",
+            },
+        )
+
+    # ── Fraud Model — IsolationForest (unsupervised) ─────────────────────────
+    base = clone(estimators["fraud"]).fit(X_sc)
+    scores_all = base.score_samples(X_sc)
+    thr = float(np.percentile(scores_all, 8))
+    y_pseudo = (scores_all < thr).astype(int)  # bottom 8% treated as ground-truth anomalies
+    kf = KFold(n_splits=5, shuffle=True, random_state=42)
+    agree, prec, rec, f1 = [], [], [], []
+    for tr, te in kf.split(X_sc):
+        est = clone(estimators["fraud"]).fit(X_sc[tr])
+        pred = (est.predict(X_sc[te]) == -1).astype(int)
+        agree.append(accuracy_score(y_pseudo[te], pred))
+        prec.append(precision_score(y_pseudo[te], pred, zero_division=0))
+        rec.append(recall_score(y_pseudo[te], pred, zero_division=0))
+        f1.append(f1_score(y_pseudo[te], pred, zero_division=0))
+    m_agree = float(np.mean(agree))
+    score_std = float(np.std(scores_all))
+    folds = [
+        {
+            "fold": f"Fold {i + 1}", "r2": f"{agree[i]:.3f}", "mse": f"{score_std:.4f}",
+            "precision": f"{prec[i] * 100:.1f}%", "recall": f"{rec[i] * 100:.1f}%",
+            "mae": f"{1 - agree[i]:.4f}", "status": _status(agree[i], m_agree, 0.05),
+        }
+        for i in range(5)
+    ]
+    out["fraud_model"] = _pack(
+        {
+            "r2Score": f"{m_agree:.3f}", "mse": f"{score_std:.4f}",
+            "precision": f"{np.mean(prec) * 100:.1f}%", "recall": f"{np.mean(rec) * 100:.1f}%",
+            "mae": f"{1 - m_agree:.4f}", "f1Score": f"{np.mean(f1):.3f}",
+        },
+        folds,
+        {
+            "r2Score": {"name": "DETECTION AGREEMENT", "sub": "Fold vs. full-model boundary"},
+            "mse": {"name": "SCORE DISPERSION", "sub": "Std-dev of anomaly scores"},
+            "mae": {"name": "DISAGREEMENT", "sub": "1 − agreement"},
+            "precision": {"name": "PRECISION", "sub": "Flagged that are true anomalies"},
+            "recall": {"name": "RECALL", "sub": "True anomalies that were flagged"},
+            "f1Score": {"name": "F1 SCORE", "sub": "Harmonic mean of P & R"},
+            "cvTitle": "5-Fold Cross Validation — IsolationForest refit per fold",
+        },
+    )
+
+    return out
+
+
 # ── Main training function ────────────────────────────────────────────────────
 
 def train_models_live(algorithm: str, parsed_statements: dict) -> dict:
@@ -429,10 +591,19 @@ def train_models_live(algorithm: str, parsed_statements: dict) -> dict:
         risk_acc, cash_acc, fraud_acc, bal_acc,
     )
 
+    # ── 4. Real 5-fold cross-validation for the Model Evaluation tab ──────────
+    logger.info("Running real 5-fold cross-validation for all models…")
+    try:
+        evaluations = evaluate_trained(algorithm, X_sc, labels)
+    except Exception:  # noqa: BLE001
+        logger.exception("Cross-validation evaluation failed — tab will use the synthetic estimate.")
+        evaluations = {}
+
     return {
         "models":       models_out,
         "algorithm":    algorithm,
         "realFeatures": real_features,
         "trainedMap":   trained_map,
         "txCount":      n_tx,
+        "evaluations":  evaluations,
     }

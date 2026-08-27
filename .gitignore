@@ -4,3 +4,4 @@ __pycache__/
 .env
 uploads/
 *.log
+.session_cache.json

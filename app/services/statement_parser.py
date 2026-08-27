@@ -2,20 +2,21 @@
 #
 # Real bank statement parser.
 #
-# PDF flow (LLM vision):
-#   1. PDF pages → PNG images via pymupdf (fitz)
-#   2. Each page image → Qwen2.5VL (vision LLM) via local Ollama API
-#   3. LLM returns structured JSON: list of transactions with date, narration,
-#      type (DEBIT/CREDIT), amount, balance
-#   4. Results merged across pages → real summary computed from actual numbers
+# PDF flow:
+#   1. Fast path — selectable-text extraction (pymupdf) → heuristic parser.
+#      Covers digital bank-statement PDFs instantly.
+#   2. Scanned/image PDFs — each page rendered to PNG and sent to a vision LLM
+#      (Gemma 4 via Ollama Cloud by default: fast, no local GPU) which returns
+#      structured JSON transactions. Results merged → real summary.
 #
-# CSV/TSV/TXT flow (unchanged):
+# CSV/TSV/TXT flow:
 #   Column-based heuristic parser — works fine for structured text files.
 
 import asyncio
 import base64
 import json
 import logging
+import os
 import re
 import urllib.error
 import urllib.request
@@ -24,19 +25,20 @@ import pymupdf as fitz  # PyMuPDF (1.28+ uses pymupdf instead of fitz)
 
 logger = logging.getLogger(__name__)
 
-# ── Ollama config ─────────────────────────────────────────────────────────────
-OLLAMA_HOST    = "http://localhost:11434"
-OLLAMA_MODEL   = "qwen2.5vl:3b"   # 3b is ~3x faster than 7b; still reads tables well
-OLLAMA_TIMEOUT = 90               # seconds per page — 3b is much quicker
+# ── Ollama vision-LLM config ────────────────────────────────────────────────
+# gemma4:31b-cloud runs on Ollama Cloud — accurate table reading, ~3-5s/page,
+# and zero load on the local machine. Override with STATEMENT_LLM_MODEL
+# (e.g. "qwen2.5vl:3b" for a fully-local model).
+OLLAMA_HOST    = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
+OLLAMA_MODEL   = os.environ.get("STATEMENT_LLM_MODEL", "gemma4:31b-cloud")
+OLLAMA_TIMEOUT = int(os.environ.get("STATEMENT_LLM_TIMEOUT", "120"))  # seconds per page
 
-# ── Page render resolution ────────────────────────────────────────────────────
-# 120 DPI: fast to render & encode, still legible for 3b vision model.
-# Only used when text extraction fails (scanned/image PDFs).
-PAGE_DPI = 120
+# ── Page render resolution ──────────────────────────────────────────────────
+# Only used for scanned/image PDFs that fall through to the vision LLM.
+PAGE_DPI = int(os.environ.get("STATEMENT_LLM_DPI", "150"))
 
 # Minimum transactions text-extraction must find before we skip the LLM.
-# If text extraction gets fewer than this, we assume it's a scanned PDF
-# and fall back to LLM vision.
+# Fewer than this → assume a scanned PDF and fall back to vision.
 MIN_TEXT_TRANSACTIONS = 3
 
 # ── LLM prompts ───────────────────────────────────────────────────────────────
@@ -110,9 +112,10 @@ def _summarize_llm(transactions: list[dict], opening: float | None, closing: flo
 
 def _call_ollama_vision(image_b64: str) -> dict | None:
     """
-    Sends one PNG page (base64) to Qwen2.5VL via Ollama /api/chat.
-    Returns parsed page dict: { opening_balance, closing_balance, transactions }
-    or None on failure / non-JSON response.
+    Sends one PNG page (base64) to the vision LLM (OLLAMA_MODEL) via Ollama
+    /api/chat. Returns parsed page dict:
+    { opening_balance, closing_balance, transactions } or None on failure /
+    non-JSON response.
     """
     payload = json.dumps({
         "model":  OLLAMA_MODEL,
@@ -153,14 +156,14 @@ def _call_ollama_vision(image_b64: str) -> dict | None:
         return None
 
 
-# ── PDF parser (Hybrid: text-first → LLM vision fallback) ────────────────────
+# ── PDF parser (text-first → vision-LLM fallback) ───────────────────────────
 
 def _try_text_extraction(doc) -> dict | None:
     """
     Fast path: extract raw text from each page using pymupdf and run it
     through the existing heuristic parser. Returns a result dict if at least
     MIN_TEXT_TRANSACTIONS transactions were found, otherwise None so the
-    caller knows to fall back to LLM vision.
+    caller knows to fall back to the vision LLM.
     """
     pages_text = []
     for page in doc:
@@ -180,30 +183,16 @@ def _try_text_extraction(doc) -> dict | None:
         return result
 
     logger.info(
-        "Text extraction found only %d transactions (< %d) — will try LLM vision.",
+        "Text extraction found only %d transactions (< %d) — will try the vision LLM.",
         len(result["transactions"]), MIN_TEXT_TRANSACTIONS,
     )
     return None
 
 
-def _parse_pdf_statement(buf: bytes) -> dict:
-    """
-    Hybrid PDF parser:
-      1. Try fast text extraction (pymupdf → heuristic parser). Instant.
-         Covers ~90% of real bank statement PDFs (digital/selectable text).
-      2. If text extraction yields < MIN_TEXT_TRANSACTIONS, fall back to
-         Qwen2.5VL 3b via Ollama — handles scanned/image-only PDFs.
-    """
-    doc = fitz.open(stream=buf, filetype="pdf")
-
-    # ── Fast path: text extraction ───────────────────────────────────────────
-    text_result = _try_text_extraction(doc)
-    if text_result is not None:
-        doc.close()
-        return text_result
-
-    # ── Slow path: LLM vision (scanned PDFs only) ────────────────────────────
-    logger.info("Falling back to LLM vision scan (Qwen2.5VL %s)…", OLLAMA_MODEL)
+def _llm_vision_extraction(doc) -> dict:
+    """Scanned/image-PDF path: send each rendered page to the vision LLM
+    (Gemma 4 via Ollama Cloud by default) and merge the JSON it returns."""
+    logger.info("Scanning PDF with vision LLM (%s)…", OLLAMA_MODEL)
     mat = fitz.Matrix(PAGE_DPI / 72, PAGE_DPI / 72)
 
     all_transactions: list[dict] = []
@@ -212,8 +201,6 @@ def _parse_pdf_statement(buf: bytes) -> dict:
 
     for page_num, page in enumerate(doc):
         logger.info("LLM scanning PDF page %d / %d …", page_num + 1, len(doc))
-
-        # Render to PNG in memory, encode base64 for Ollama
         pix       = page.get_pixmap(matrix=mat, alpha=False)
         image_b64 = base64.b64encode(pix.tobytes("png")).decode("ascii")
 
@@ -222,35 +209,29 @@ def _parse_pdf_statement(buf: bytes) -> dict:
             logger.warning("Page %d: LLM returned no data, skipping.", page_num + 1)
             continue
 
-        # Capture opening/closing balances (first page that has them wins)
         if opening_balance is None and page_data.get("opening_balance") is not None:
             try:
                 opening_balance = float(page_data["opening_balance"])
             except (TypeError, ValueError):
                 pass
-
         if page_data.get("closing_balance") is not None:
             try:
                 closing_balance = float(page_data["closing_balance"])
             except (TypeError, ValueError):
                 pass
 
-        # Normalize and collect transactions from this page
         for tx in page_data.get("transactions") or []:
             try:
                 amount = float(tx.get("amount") or 0)
                 if amount <= 0:
                     continue
-
                 tx_type = str(tx.get("type") or "CREDIT").upper()
                 if tx_type not in ("DEBIT", "CREDIT"):
                     tx_type = "CREDIT"
-
                 try:
                     balance = float(tx["balance"]) if tx.get("balance") is not None else None
                 except (TypeError, ValueError):
                     balance = None
-
                 all_transactions.append({
                     "date":      str(tx.get("date") or ""),
                     "narration": str(tx.get("narration") or "Transaction")[:200],
@@ -261,15 +242,34 @@ def _parse_pdf_statement(buf: bytes) -> dict:
             except Exception as exc:  # noqa: BLE001
                 logger.debug("Skipping malformed tx row: %s", exc)
 
-    doc.close()
-
     if not all_transactions:
-        logger.warning("LLM extracted 0 transactions — check PDF and Ollama model.")
-        result = _empty_result()
-        result["error"] = "Could not extract transactions from this PDF (tried text + LLM vision)."
-        return result
-
+        return _empty_result()
     return _summarize_llm(all_transactions, opening_balance, closing_balance)
+
+
+def _parse_pdf_statement(buf: bytes) -> dict:
+    """
+    PDF parser:
+      1. selectable-text extraction (pymupdf → heuristic parser) — instant,
+         covers digital bank-statement PDFs.
+      2. If that yields < MIN_TEXT_TRANSACTIONS, render each page and send it
+         to the vision LLM (STATEMENT_LLM_MODEL, default gemma4:31b-cloud).
+    """
+    doc = fitz.open(stream=buf, filetype="pdf")
+    try:
+        text_result = _try_text_extraction(doc)
+        if text_result is not None:
+            return text_result
+
+        llm_result = _llm_vision_extraction(doc)
+        if llm_result["transactions"]:
+            return llm_result
+
+        result = _empty_result()
+        result["error"] = "Could not extract transactions from this PDF (tried text + vision LLM)."
+        return result
+    finally:
+        doc.close()
 
 
 # ── CSV / TSV / TXT parser (unchanged) ───────────────────────────────────────
@@ -451,7 +451,7 @@ def _parse_statement_text(text: str) -> dict:
 async def parse_statement(buf: bytes, file_name: str) -> dict:
     """
     Dispatches to the correct parser based on file extension.
-    PDF  → LLM vision via Qwen2.5VL (Ollama) — reads the page as an image.
+    PDF  → selectable-text extraction, then vision LLM for scanned PDFs.
     CSV/TSV/TXT → column/heuristic text parser.
     """
     ext = (file_name.rsplit(".", 1)[-1] if "." in file_name else "").lower()
@@ -459,11 +459,11 @@ async def parse_statement(buf: bytes, file_name: str) -> dict:
         if ext in ("csv", "tsv", "txt"):
             return _parse_csv_statement(buf.decode("utf-8", errors="replace"))
         if ext == "pdf":
-            # _parse_pdf_statement does blocking PDF rendering + a blocking
-            # urllib call to Ollama (up to 90s/page). Running it inline would
-            # freeze the whole asyncio event loop — and with it every other
-            # endpoint in the app — for the entire scan. Push it to a worker
-            # thread so the rest of the API stays responsive.
+            # _parse_pdf_statement does blocking PDF rendering and a blocking
+            # urllib call to Ollama. Running it inline would freeze the whole
+            # asyncio event loop — and with it every other endpoint in the app
+            # — for the entire scan. Push it to a worker thread so the rest of
+            # the API stays responsive.
             return await asyncio.to_thread(_parse_pdf_statement, buf)
     except Exception as err:  # noqa: BLE001
         logger.exception("Statement parse failed for %s", file_name)

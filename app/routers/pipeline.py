@@ -62,6 +62,7 @@ async def upload_file(sourceId: str = Form(...), file: UploadFile = File(...)):
         "transactionsParsed": len(parsed["transactions"]),
     }
     session_state.parsed_statements[sourceId] = parsed
+    session_state.persist()
 
     return {"uploadedFiles": session_state.uploaded_files, "analysis": analysis, "statement": parsed}
 
@@ -95,6 +96,7 @@ async def autofill_uploads(body: AutofillBody):
             "scannedAt": datetime.now(timezone.utc).isoformat(),
             "autoFilled": True,
         }
+    session_state.persist()
     return {"uploadedFiles": session_state.uploaded_files}
 
 
@@ -118,6 +120,7 @@ async def run_pipeline_handler(body: RunPipelineBody):
         "processedTable": result["processedTable"],
         "lastRunAt": result["completedAt"],
     }
+    session_state.persist()
 
     return {
         "pipeline": session_state.pipeline,

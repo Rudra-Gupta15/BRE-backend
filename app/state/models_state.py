@@ -19,6 +19,9 @@ class ModelsState:
         self.trained_sklearn_map: dict = {}
         # Real features extracted from the last uploaded statement
         self.real_features: dict = {}
+        # Real 5-fold cross-validation results per model_id, computed at train
+        # time and served by the Model Evaluation tab. Empty until first train.
+        self.evaluation_cache: dict = {}
 
     def reset(self):
         self.trained_models = []
@@ -27,6 +30,7 @@ class ModelsState:
         self.last_training_run = None
         self.trained_sklearn_map = {}
         self.real_features = {}
+        self.evaluation_cache = {}
 
 
 models_state = ModelsState()
