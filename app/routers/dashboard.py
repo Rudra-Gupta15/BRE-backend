@@ -1,53 +1,92 @@
 from fastapi import APIRouter
 
+from app.services.persistence import dashboard_snapshot
 from app.state.session_state import session_state
 
 router = APIRouter(prefix="/dashboard", tags=["dashboard"])
 
-BASELINE_RECENT_STATEMENTS = [
-    {"id": "STMT-2026-0891", "bank": "Axis Bank AA Feed", "date": "2026-08-25T16:45:00.000Z", "txCount": 142, "riskScore": 885, "grade": "LOW", "status": "ANALYZED"},
-    {"id": "STMT-2026-0890", "bank": "HDFC Bank Statement", "date": "2026-08-25T16:20:00.000Z", "txCount": 69, "riskScore": 851, "grade": "LOW", "status": "ANALYZED"},
-    {"id": "STMT-2026-0889", "bank": "ICICI Corporate Feed", "date": "2026-08-25T15:50:00.000Z", "txCount": 310, "riskScore": 720, "grade": "MEDIUM", "status": "ANALYZED"},
-    {"id": "STMT-2026-0888", "bank": "State Bank of India", "date": "2026-08-25T14:15:00.000Z", "txCount": 88, "riskScore": 912, "grade": "LOW", "status": "ANALYZED"},
-    {"id": "STMT-2026-0887", "bank": "Kotak Mahindra Feed", "date": "2026-08-25T13:00:00.000Z", "txCount": 18, "riskScore": 490, "grade": "HIGH", "status": "FAILED"},
+# Shown only before any analysis has been run (empty DB / fresh session) so the
+# dashboard isn't blank on first load. Once real runs exist they take over.
+_SEED_RECENT = [
+    {"id": "—", "bank": "No analyses yet", "date": None, "txCount": 0, "riskScore": None, "grade": None, "status": "—"},
 ]
+
+
+def _kpi(id_, label, value, desc, badge, sub=None):
+    d = {"id": id_, "label": label, "value": value, "desc": desc, "badge": badge}
+    if sub:
+        d["sub"] = sub
+    return d
 
 
 @router.get("/kpis")
 async def get_kpis():
-    live_runs = len(session_state.inference_history)
+    snap = dashboard_snapshot()
+    if snap is None:
+        # No database — derive what we can from this session's run history.
+        hist = session_state.inference_history
+        scores = [h["riskScore"] for h in hist if isinstance(h.get("riskScore"), (int, float))]
+        avg = round(sum(scores) / len(scores), 1) if scores else None
+        snap = {
+            "analyzed": len(hist),
+            "processed": sum(h.get("txCount", 0) for h in hist),
+            "avgScore": avg,
+            "anomalies": 0,
+            "pending": sum(1 for h in hist if h.get("grade") == "MEDIUM"),
+        }
+
     return {
         "kpis": [
-            {"id": "analyzed", "label": "ANALYZED", "value": 89 + live_runs, "desc": "Statements analyzed", "badge": "+12.4%"},
-            {"id": "processed", "label": "PROCESSED", "value": 16668, "desc": "Transactions processed", "badge": "+8.2%"},
-            {"id": "avg_score", "label": "AVG SCORE", "value": 877.9, "sub": "/ 900", "desc": "Average risk score", "badge": "Optimal"},
-            {"id": "pending", "label": "PENDING", "value": 571, "desc": "Pending human reviews", "badge": "Queued"},
-            {"id": "anomalies", "label": "ANOMALIES", "value": 4540, "desc": "Anomalies flagged", "badge": "Flagged"},
+            _kpi("analyzed", "ANALYZED", snap["analyzed"], "Statements analyzed", "Live"),
+            _kpi("processed", "PROCESSED", snap["processed"], "Transactions processed", "Live"),
+            _kpi("avg_score", "AVG SCORE",
+                 snap["avgScore"] if snap["avgScore"] is not None else "—",
+                 "Average credit score", "/ 900", sub="/ 900"),
+            _kpi("pending", "PENDING", snap["pending"], "Conditional / review cases", "Queued"),
+            _kpi("anomalies", "ANOMALIES", snap["anomalies"], "Anomalies flagged", "Flagged"),
         ]
     }
 
 
 @router.get("/charts")
 async def get_charts():
+    snap = dashboard_snapshot()
+    if snap is None:
+        hist = session_state.inference_history
+        grades = {"LOW": 0, "MEDIUM": 0, "HIGH": 0}
+        for h in hist:
+            if h.get("grade") in grades:
+                grades[h["grade"]] += 1
+        return {
+            "byStatus": [{"status": "ANALYZED", "count": len(hist)}],
+            "byRiskGrade": [
+                {"name": "LOW Risk", "value": grades["LOW"]},
+                {"name": "MEDIUM Risk", "value": grades["MEDIUM"]},
+                {"name": "HIGH Risk", "value": grades["HIGH"]},
+            ],
+        }
+
+    g = snap["byRiskGrade"]
+    by_status = [{"status": k, "count": v} for k, v in sorted(snap["byDecision"].items()) if k]
     return {
-        "byStatus": [
-            {"status": "ANALYZED", "count": 76},
-            {"status": "FAILED", "count": 7},
-            {"status": "NORMALIZED", "count": 6},
-        ],
+        "byStatus": by_status or [{"status": "ANALYZED", "count": snap["analyzed"]}],
         "byRiskGrade": [
-            {"name": "LOW Risk", "value": 75},
-            {"name": "MEDIUM Risk", "value": 8},
-            {"name": "HIGH Risk", "value": 6},
+            {"name": "LOW Risk", "value": g["LOW"]},
+            {"name": "MEDIUM Risk", "value": g["MEDIUM"]},
+            {"name": "HIGH Risk", "value": g["HIGH"]},
         ],
     }
 
 
 @router.get("/recent-statements")
 async def get_recent_statements():
-    live_statements = [
-        {"id": h["id"], "bank": h["bank"], "date": h["date"], "txCount": h["txCount"], "riskScore": h["riskScore"], "grade": h["grade"], "status": h["status"]}
+    snap = dashboard_snapshot()
+    if snap is not None and snap["recent"]:
+        return {"recentStatements": snap["recent"]}
+
+    live = [
+        {"id": h["id"], "bank": h["bank"], "date": h["date"], "txCount": h["txCount"],
+         "riskScore": h["riskScore"], "grade": h["grade"], "status": h["status"]}
         for h in session_state.inference_history
     ]
-    merged = (live_statements + BASELINE_RECENT_STATEMENTS)[:8]
-    return {"recentStatements": merged}
+    return {"recentStatements": (live or _SEED_RECENT)[:8]}

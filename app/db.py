@@ -79,6 +79,7 @@ def init_db() -> None:
         with engine.begin() as conn:
             conn.execute(text(f'CREATE SCHEMA IF NOT EXISTS "{DB_SCHEMA}"'))
         Base.metadata.create_all(engine)
+        _sync_missing_columns()
         DB_ENABLED = True
         logger.info("PostgreSQL connected — persistence enabled (%s).", engine.url.render_as_string(hide_password=True))
     except Exception as exc:  # noqa: BLE001
@@ -86,6 +87,43 @@ def init_db() -> None:
         SessionLocal = None
         DB_ENABLED = False
         logger.warning("Could not connect to PostgreSQL (%s) — falling back to in-memory only.", exc)
+
+
+_SA_TO_SQL = {
+    "INTEGER": "INTEGER", "BIGINT": "BIGINT", "SMALLINT": "SMALLINT",
+    "BOOLEAN": "BOOLEAN", "FLOAT": "DOUBLE PRECISION", "DOUBLE PRECISION": "DOUBLE PRECISION",
+    "DATETIME": "TIMESTAMP WITH TIME ZONE", "TEXT": "TEXT", "JSON": "JSON",
+}
+
+
+def _sync_missing_columns() -> None:
+    """`create_all` makes missing TABLES but never adds a column to a table that
+    already exists. This adds any column defined on the ORM models that the live
+    table is missing (simple additive types only — no drops, no type changes)."""
+    from sqlalchemy import inspect
+
+    insp = inspect(engine)
+    with engine.begin() as conn:
+        for table in Base.metadata.sorted_tables:
+            if not insp.has_table(table.name, schema=DB_SCHEMA):
+                continue
+            live = {c["name"] for c in insp.get_columns(table.name, schema=DB_SCHEMA)}
+            for col in table.columns:
+                if col.name in live:
+                    continue
+                sa_type = str(col.type)
+                sql_type = _SA_TO_SQL.get(sa_type.split("(")[0].upper())
+                if sql_type is None:
+                    if sa_type.upper().startswith(("VARCHAR", "NUMERIC")):
+                        sql_type = sa_type
+                    else:
+                        logger.warning("Skipping ADD COLUMN %s.%s — unmapped type %s",
+                                       table.name, col.name, sa_type)
+                        continue
+                conn.execute(text(
+                    f'ALTER TABLE "{DB_SCHEMA}".{table.name} ADD COLUMN IF NOT EXISTS {col.name} {sql_type}'
+                ))
+                logger.info("Added column %s.%s (%s)", table.name, col.name, sql_type)
 
 
 def get_session():

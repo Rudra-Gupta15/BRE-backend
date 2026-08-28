@@ -39,7 +39,7 @@ from sklearn.metrics import (
     r2_score,
     recall_score,
 )
-from sklearn.model_selection import KFold, StratifiedKFold, cross_val_score
+from sklearn.model_selection import KFold, StratifiedKFold, cross_val_predict, cross_val_score
 from sklearn.preprocessing import StandardScaler
 from sklearn.svm import SVC, SVR
 
@@ -606,3 +606,232 @@ def train_models_live(algorithm: str, parsed_statements: dict) -> dict:
         "txCount":      n_tx,
         "evaluations":  evaluations,
     }
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Dataset-based training (Model Hub → "Upload Training Dataset")
+#
+# Trains on the FULL accumulated dataset (dataset_store) and saves a NEW
+# versioned model (model_registry). Old versions are kept — more data each
+# upload → a better model, with the metric delta shown.
+# ═════════════════════════════════════════════════════════════════════════════
+
+import pandas as pd  # noqa: E402
+from sklearn.ensemble import HistGradientBoostingClassifier, HistGradientBoostingRegressor  # noqa: E402
+
+
+def _dataset_estimators(algorithm: str):
+    """Fast estimators tuned for a 10k+ row tabular dataset."""
+    alg = algorithm.lower()
+    if alg == "random_forest":
+        return (
+            RandomForestClassifier(n_estimators=120, max_depth=12, n_jobs=-1, random_state=42),
+            RandomForestRegressor(n_estimators=120, max_depth=14, n_jobs=-1, random_state=42),
+        )
+    if alg == "logistic_regression":
+        return (LogisticRegression(max_iter=600, random_state=42), Ridge(alpha=1.0))
+    # gradient_boosting / svm / default → histogram GB (fast, scales to 10k+)
+    return (
+        HistGradientBoostingClassifier(max_iter=200, learning_rate=0.08, random_state=42),
+        HistGradientBoostingRegressor(max_iter=200, learning_rate=0.08, random_state=42),
+    )
+
+
+def _series(df: "pd.DataFrame", name: str, default: float = 0.5):
+    if name in df.columns:
+        return pd.to_numeric(df[name], errors="coerce").fillna(default)
+    return pd.Series(default, index=df.index)
+
+
+def _policy_labels(df: "pd.DataFrame"):
+    """Weak-supervision target: a credit-policy score over the risk features,
+    since the raw dataset has no ground-truth default column."""
+    risk = (
+        0.24 * _series(df, "bounce_count")
+        + 0.18 * _series(df, "overdraft_count")
+        + 0.18 * _series(df, "negative_balance_days")
+        + 0.12 * (_series(df, "emi_to_credit_ratio", 0.15) / 0.30).clip(0, 1)
+        + 0.10 * (_series(df, "existing_debt_burden", 0.25) / 0.50).clip(0, 1)
+        + 0.10 * (1 - _series(df, "income_consistency_score", 0.75))
+        + 0.08 * (1 - ((_series(df, "cash_flow_stability_score", 0.52) - 0.39) / 0.27).clip(0, 1))
+        - 0.12 * (_series(df, "monthly_net_cash_flow", 0.15) / 0.30).clip(0, 1)
+    )
+    if "account_status" in df.columns:
+        risk = risk + 0.05 * (df["account_status"].astype(str).str.upper() == "DORMANT").astype(float)
+    risk = risk.clip(0, 1)
+    label = (risk > risk.quantile(0.55)).astype(int).to_numpy()
+    score = (900 - risk * 620).clip(300, 900).round().to_numpy()
+    return label, score, risk.to_numpy()
+
+
+def _golden_accuracy(artifact: dict) -> float | None:
+    """Accuracy of a trained artifact on the frozen, trusted golden set — the
+    yardstick a poisoned corpus cannot move."""
+    from app.services.security import poisoning
+
+    gdf = poisoning.load_golden_set()
+    if gdf is None or len(gdf) < 30:
+        return None
+    try:
+        from app.services import dataset_store
+
+        Xg, _, _ = dataset_store.feature_frame(gdf)
+        Xg = Xg.reindex(columns=artifact["feat_names"], fill_value=0.0)
+        yl, _, _ = _policy_labels(gdf)
+        xs = artifact["scaler"].transform(Xg.to_numpy(dtype=float))
+        pred = artifact["classifier"].predict(xs)
+        return round(float(accuracy_score(yl, pred)), 4)
+    except Exception:  # noqa: BLE001
+        logger.exception("golden-set evaluation failed")
+        return None
+
+
+def train_on_dataset(algorithm: str = "gradient_boosting", lineage: list[int] | None = None,
+                     batches: list[int] | None = None) -> dict:
+    from app.services import dataset_store, model_registry
+    from app.services.security import poisoning
+
+    df = dataset_store.load()
+    if df is None or len(df) < 200:
+        have = 0 if df is None else len(df)
+        raise ValueError(f"Training dataset needs at least 200 rows (have {have}). Upload a CSV first.")
+
+    # Freeze the trusted golden validation slice on first train (never rewritten).
+    poisoning.ensure_golden_set(df)
+
+    X, num_cols, onehot_cols = dataset_store.feature_frame(df)
+    feat_names = list(X.columns)
+    y_label, y_score, _ = _policy_labels(df)
+
+    Xv = X.to_numpy(dtype=float)
+    scaler = StandardScaler().fit(Xv)
+    Xs = scaler.transform(Xv)
+
+    clf, reg = _dataset_estimators(algorithm)
+
+    # 3-fold CV is plenty at 10k rows and keeps the "Train" button responsive.
+    skf = StratifiedKFold(n_splits=3, shuffle=True, random_state=42)
+    kf = KFold(n_splits=3, shuffle=True, random_state=42)
+    pred_l = cross_val_predict(clone(clf), Xs, y_label, cv=skf, n_jobs=-1)
+    pred_s = cross_val_predict(clone(reg), Xs, y_score, cv=kf, n_jobs=-1)
+
+    metrics = {
+        "accuracy": round(float(accuracy_score(y_label, pred_l)), 4),
+        "precision": round(float(precision_score(y_label, pred_l, zero_division=0)), 4),
+        "recall": round(float(recall_score(y_label, pred_l, zero_division=0)), 4),
+        "f1": round(float(f1_score(y_label, pred_l, zero_division=0)), 4),
+        "scoreR2": round(float(r2_score(y_score, pred_s)), 4),
+        "scoreMae": round(float(mean_absolute_error(y_score, pred_s)), 2),
+        "highRiskRate": round(float(y_label.mean()), 3),
+    }
+
+    clf.fit(Xs, y_label)
+    reg.fit(Xs, y_score)
+
+    artifact = {
+        "scaler": scaler,
+        "classifier": clf,
+        "regressor": reg,
+        "feat_names": feat_names,
+        "num_cols": num_cols,
+        "onehot_cols": onehot_cols,
+        "col_means": {c: float(X[c].mean()) for c in feat_names},
+    }
+
+    prev = model_registry.active_meta()
+
+    # ── Data-poisoning guard: score the candidate on the frozen golden set and
+    #    refuse to promote it if it regresses the active model beyond the limit.
+    golden_acc = _golden_accuracy(artifact)
+    prev_golden = (prev or {}).get("goldenAccuracy")
+    guard = poisoning.promotion_guard(golden_acc, prev_golden) if golden_acc is not None \
+        else {"promote": True, "reason": "golden set unavailable — promoted on CV metrics"}
+
+    entry = model_registry.save_version(
+        artifact, algorithm=algorithm, metrics=metrics, n_samples=len(df),
+        lineage=lineage, batches=batches, golden_accuracy=golden_acc,
+        may_promote=guard["promote"], promotion_note=guard["reason"],
+    )
+    delta = None
+    if prev and prev.get("metrics"):
+        pm = prev["metrics"]
+        delta = {k: round(metrics[k] - pm.get(k, 0.0), 4) for k in ("accuracy", "f1", "scoreR2")}
+
+    if not guard["promote"]:
+        try:
+            from app.services.persistence import log_security_event
+            log_security_event("poisoning", "block", f"train:v{entry['version']}",
+                               {"reason": guard["reason"], "goldenAccuracy": golden_acc})
+        except Exception:  # noqa: BLE001
+            pass
+
+    logger.info("Dataset model v%d trained on %d rows — acc %.3f, scoreR2 %.3f, golden %s, promote=%s.",
+                entry["version"], len(df), metrics["accuracy"], metrics["scoreR2"],
+                golden_acc, guard["promote"])
+    return {
+        "version": entry["version"],
+        "activeVersion": entry.get("activeVersion", entry["version"]),
+        "nSamples": int(len(df)),
+        "features": len(feat_names),
+        "algorithm": algorithm,
+        "metrics": metrics,
+        "previousVersion": prev["version"] if prev else None,
+        "delta": delta,
+        "goldenAccuracy": golden_acc,
+        "promoted": guard["promote"],
+        "promotionNote": guard["reason"],
+    }
+
+
+# ── Using a registry model for one applicant's statement ─────────────────────
+
+_STMT_FEATURE_MAP = {
+    # dataset column        →  a 0-1 value derived from the parsed statement
+    "bounce_count":              lambda fv, c: min(1.0, fv["nach_bounce_count_90d"] / 3.0),
+    "overdraft_count":           lambda fv, c: 1.0 if fv["minimum_balance"] < 0 else 0.0,
+    "negative_balance_days":     lambda fv, c: 1.0 if fv["minimum_balance"] < 0 else min(1.0, max(0.0, (10000 - fv["minimum_balance"]) / 10000)) if fv["minimum_balance"] < 10000 else 0.0,
+    "income_consistency_score":  lambda fv, c: fv["income_stability"],
+    "credit_regularity_score":   lambda fv, c: 0.5 + 0.5 * fv["income_stability"],
+    "cash_flow_stability_score": lambda fv, c: max(0.0, min(1.0, 0.55 - fv["balance_volatility"] * 0.4)),
+    "monthly_net_cash_flow":     lambda fv, c: max(0.0, min(1.0, (fv["avg_monthly_inflow"] - fv.get("avg_monthly_debit", fv["avg_monthly_inflow"])) / max(fv["avg_monthly_inflow"], 1) + 0.15)),
+    "emi_to_credit_ratio":       lambda fv, c: max(0.0, min(0.30, (fv["foir_ratio"] / 100 - 1.0) * 0.3 + 0.15)),
+    "existing_debt_burden":      lambda fv, c: max(0.05, min(0.48, fv["foir_ratio"] / 250)),
+    "cash_withdrawal_amount":    lambda fv, c: min(1.0, fv["cash_withdrawal_ratio"] * 3),
+    "credit_debit_ratio":        lambda fv, c: max(0.95, min(1.0, fv["dscr_ratio"] / 1.0)) if fv["dscr_ratio"] < 1 else 1.0,
+}
+
+
+def score_statement_with_registry(fv: dict) -> dict | None:
+    """Run one applicant's underwriting feature vector through the active
+    registry model. Starts from the training-set column means and overrides
+    the columns we can actually derive from a single statement."""
+    from app.services import model_registry
+
+    loaded = model_registry.load_active()
+    if not loaded:
+        return None
+    art = loaded["artifact"]
+    feat_names = art["feat_names"]
+    means = art.get("col_means", {})
+
+    row = np.array([means.get(c, 0.0) for c in feat_names], dtype=float)
+    idx = {c: i for i, c in enumerate(feat_names)}
+    for col, fn in _STMT_FEATURE_MAP.items():
+        if col in idx:
+            try:
+                row[idx[col]] = float(fn(fv, col))
+            except Exception:  # noqa: BLE001
+                pass
+
+    try:
+        xs = art["scaler"].transform(row.reshape(1, -1))
+        model_score = float(art["regressor"].predict(xs)[0])
+        p_high = float(art["classifier"].predict_proba(xs)[0, 1]) if hasattr(art["classifier"], "predict_proba") else None
+        return {
+            "modelScore": max(300.0, min(900.0, model_score)),
+            "pHighRisk": p_high,
+            "version": loaded["meta"]["version"],
+        }
+    except Exception:  # noqa: BLE001
+        logger.exception("score_statement_with_registry failed")
+        return None

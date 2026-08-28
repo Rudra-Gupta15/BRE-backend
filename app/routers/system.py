@@ -13,7 +13,18 @@ _start_time = time.time()
 
 @router.get("/health")
 async def health_check():
-    return {"status": "ok", "uptime": time.time() - _start_time, "timestamp": datetime.now(timezone.utc).isoformat()}
+    from app import db
+
+    return {
+        "status": "ok",
+        "uptime": time.time() - _start_time,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "database": {
+            "connected": db.DB_ENABLED,
+            "url": db.engine.url.render_as_string(hide_password=True) if db.engine else None,
+        },
+        "analyzedThisSession": len(session_state.inference_history),
+    }
 
 
 @router.post("/reset")

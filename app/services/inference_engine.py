@@ -6,7 +6,7 @@ from datetime import date, datetime
 
 from app.data.applicant_templates import ANOMALY_REASONS, MODEL_ANALYTICS_META, MONTHS, TRANSACTION_TEMPLATES
 from app.data.model_catalog import MODEL_TEMPLATES
-from app.data.underwriting_rules import CREDIT_SCORE_GATE_RULE_ID, CREDIT_SCORE_GATE_THRESHOLD
+from app.data.underwriting_rules import CREDIT_SCORE_GATE_RULE_ID
 from app.services.rng import create_rng, pick, rand_int, rand_range
 from app.state.settings_state import settings_state
 
@@ -16,9 +16,10 @@ def inr(n: float) -> str:
 
 
 def score_to_grade(score: int) -> str:
-    if score >= 700:
+    sc = settings_state.scoring
+    if score >= sc.grade_low_min:
         return "LOW"
-    if score >= 550:
+    if score >= sc.grade_medium_min:
         return "MEDIUM"
     return "HIGH"
 
@@ -42,14 +43,16 @@ def apply_rule_engine(risk: dict) -> dict:
     if not settings_state.enabled_rules.get(CREDIT_SCORE_GATE_RULE_ID):
         return risk
 
-    passed = risk["score"] > CREDIT_SCORE_GATE_THRESHOLD
+    threshold = settings_state.scoring.gate_threshold
+    passed = risk["score"] > threshold
     return {
         **risk,
-        "grade": "LOW" if passed else "HIGH",
+        "gradeRaw": risk["grade"],  # the underlying 3-tier LOW/MEDIUM/HIGH band
+        "grade": "LOW" if passed else "HIGH",  # gate collapses it to pass/fail
         "decision": "APPROVED" if passed else "REJECTED",
         "gateRule": {
             "id": CREDIT_SCORE_GATE_RULE_ID,
-            "threshold": CREDIT_SCORE_GATE_THRESHOLD,
+            "threshold": threshold,
             "passed": passed,
         },
     }
@@ -221,55 +224,129 @@ def compute_real_feature_vector(parsed: dict) -> dict:
     }
 
 
-def compute_real_credit_score(fv: dict) -> dict:
-    """Deterministic (non-random) credit score from real statement ratios.
-
-    A clean salaried account — regular inflow, spends roughly what it earns,
-    keeps a positive balance, no bounces — lands ~750-800. Real problems pull
-    it down: cheque/NACH bounces, overdrafts, spending far above income,
-    erratic inflow, heavy cash usage."""
-    score = 740.0
+def _scorecard(fv: dict) -> float:
+    """The hand-tuned points-based scorecard. Weights come from
+    settings_state.scoring (editable via /api/settings/scoring)."""
+    c = settings_state.scoring
+    score = c.baseline
 
     # 1. Surplus — does monthly inflow cover outflow, with headroom?
     inflow = fv["avg_monthly_inflow"]
     debit = fv.get("avg_monthly_debit", inflow)
     surplus_ratio = ((inflow - debit) / inflow) if inflow > 0 else -1.0
-    score += max(-180.0, min(55.0, surplus_ratio * 220.0))
-    if surplus_ratio < -0.15:  # sustained overspending — extra hit
-        score -= 45.0
+    score += max(c.surplus_floor, min(c.surplus_cap, surplus_ratio * c.surplus_weight))
+    if surplus_ratio < c.overspend_trigger:
+        score -= c.overspend_extra_penalty
 
     # 2. Income regularity (0..1)
-    score += (fv["income_stability"] - 0.6) * 130.0
+    score += (fv["income_stability"] - c.income_stability_pivot) * c.income_stability_weight
 
-    # 3. Cheque / NACH / ECS bounces — serious (near-auto-decline in practice)
-    if fv["nach_bounce_count_90d"] > 0:
-        score -= min(260.0, 110.0 + (fv["nach_bounce_count_90d"] - 1) * 80.0)
+    # 3. Cheque / NACH / ECS bounces
+    n = fv["nach_bounce_count_90d"]
+    if n > 0:
+        score -= min(c.bounce_cap, c.bounce_first + (n - 1) * c.bounce_each_after)
 
     # 4. Minimum balance / overdraft
     mb = fv["minimum_balance"]
     if mb < 0:
-        score -= 170.0
+        score -= c.overdraft_penalty
     elif mb < 2000:
-        score -= 70.0
+        score -= c.low_balance_2k_penalty
     elif mb < 10000:
-        score -= 25.0
-    elif mb > 100000:
-        score += 25.0
+        score -= c.low_balance_10k_penalty
+    elif mb > c.high_balance_threshold:
+        score += c.high_balance_bonus
 
-    # 5. Very erratic balances — mild negative
-    score -= max(0.0, min(1.2, fv["balance_volatility"] - 0.4)) * 70.0
+    # 5. Erratic balances
+    score -= max(0.0, min(1.2, fv["balance_volatility"] - c.volatility_pivot)) * c.volatility_weight
 
     # 6. Heavy cash-withdrawal dependence
-    score -= max(0.0, min(0.4, fv["cash_withdrawal_ratio"] - 0.12)) * 250.0
+    score -= max(0.0, min(0.4, fv["cash_withdrawal_ratio"] - c.cash_withdrawal_pivot)) * c.cash_withdrawal_weight
 
-    # 7. Genuinely strong (business-style) debt-service coverage
-    if fv["dscr_ratio"] >= 1.3:
-        score += min(35.0, (fv["dscr_ratio"] - 1.3) * 40.0)
+    # 7. Strong (business-style) debt-service coverage
+    if fv["dscr_ratio"] >= c.dscr_bonus_threshold:
+        score += min(c.dscr_bonus_cap, (fv["dscr_ratio"] - c.dscr_bonus_threshold) * c.dscr_bonus_weight)
 
-    score = max(300, min(900, round(score)))
-    pd = max(0.3, round(((850 - score) / 850) * 18, 1))
+    return score
+
+
+def _model_score(parsed: dict) -> float | None:
+    """Runs the real statement's features through the trained sklearn risk
+    classifier and maps its P(high-risk) to a 300-900 score. None when no
+    model has been trained on the Model Hub page."""
+    try:
+        from app.services.ml_trainer import extract_features
+        from app.state.models_state import models_state
+    except Exception:  # noqa: BLE001
+        return None
+
+    trained = models_state.trained_sklearn_map.get("risk_model")
+    if not trained:
+        return None
+    try:
+        import numpy as np
+
+        feats = extract_features(parsed)
+        names = trained.get("feat_names") or list(feats.keys())
+        x = np.array([[feats[k] for k in names]], dtype=float)
+        x = trained["scaler"].transform(x)
+        model = trained["model"]
+        if hasattr(model, "predict_proba"):
+            p_high = float(model.predict_proba(x)[0, 1])
+        else:
+            p_high = float(model.predict(x)[0])
+        return 900.0 - p_high * 600.0  # p_high 0 → 900, 1 → 300
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _registry_model_score(fv: dict) -> dict | None:
+    """The population model trained on the uploaded dataset(s) (model_registry)."""
+    try:
+        from app.services.ml_trainer import score_statement_with_registry
+
+        return score_statement_with_registry(fv)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def compute_real_credit_score(fv: dict, parsed: dict | None = None) -> dict:
+    """Credit score from the real statement:
+
+      • a transparent points scorecard (weights in settings_state.scoring), and
+      • an ML component blended in at `ml_blend_weight` — the population model
+        trained on the uploaded dataset (model_registry) if one exists, else
+        the per-session model trained on the Model Hub page.
+
+    A clean salaried account lands ~780-850; bounces / overdrafts / overspending
+    / erratic inflow pull it down."""
+    c = settings_state.scoring
+    card = _scorecard(fv)
+
+    ml, ml_source = None, None
+    reg = _registry_model_score(fv)
+    if reg is not None:
+        ml, ml_source = reg["modelScore"], f"dataset-v{reg['version']}"
+    elif parsed:
+        m = _model_score(parsed)
+        if m is not None:
+            ml, ml_source = m, "session-model"
+
+    if ml is not None and 0.0 < c.ml_blend_weight <= 1.0:
+        final = (1.0 - c.ml_blend_weight) * card + c.ml_blend_weight * ml
+        blended = True
+    else:
+        final = card
+        blended = False
+
+    score = max(300, min(900, round(final)))
+    pd = max(c.pd_floor, round(((c.pd_scale_denom - score) / c.pd_scale_denom) * c.pd_scale_max, 1))
     grade = score_to_grade(score)
-    return {"score": score, "pd": pd, "grade": grade, "decision": decision_for_grade(grade)}
+    return {
+        "score": score, "pd": pd, "grade": grade, "decision": decision_for_grade(grade),
+        "scorecardScore": round(card), "modelScore": round(ml) if ml is not None else None,
+        "modelSource": ml_source, "mlBlended": blended,
+    }
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -604,7 +681,11 @@ def _real_analytics(
                 rs = compute_real_credit_score(fv)
                 score, pd = rs["score"], rs["pd"]
             grade = score_to_grade(score)
-            chart.append({"month": label, "PDRiskPct": round(pd, 1), "CreditScore": round(score)})
+            chart.append({
+                "month": label, "PDRiskPct": round(pd, 1), "CreditScore": round(score),
+                "Inflow": inflow, "Outflow": outflow, "NetCashflow": inflow - outflow,
+                "ADB": adb, "MinBal": min_bal,
+            })
             table_rows.append({
                 "col1": label, "col2": f"{pd:.1f}%", "col3": f"{round(score)}",
                 "col4": inr(inflow), "col5": inr(outflow), "col6": inr(adb),
@@ -804,7 +885,8 @@ def generate_bre_payload(
     to ground this in the user's actual data; otherwise falls back to a
     customId-seeded synthetic profile."""
     risk = real_risk_score or compute_credit_score(custom_id)
-    score, pd, grade = risk["score"], risk["pd"], risk["grade"]
+    score, pd = risk["score"], risk["pd"]
+    grade = risk.get("gradeRaw") or risk["grade"]  # 3-tier band; `decision` holds the gate outcome
     rng = create_rng(f"payload:{custom_id}")
 
     _inflow = rand_int(rng, 35000, 62000)

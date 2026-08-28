@@ -8,3 +8,9 @@ uploads/
 
 # generated feature-vector CSV (runtime output)
 app/data/generated/
+.settings_cache.json
+
+# versioned model artifacts + accumulated training data (runtime)
+# also holds: .signing_key, golden_set.csv, outlier_profile.json (ML-security state)
+models/
+app/data/training/

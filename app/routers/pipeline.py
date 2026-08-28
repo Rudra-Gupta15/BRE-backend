@@ -4,8 +4,9 @@ from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel
 
 from app.services.file_analysis import analyze_file
-from app.services.persistence import save_statement
+from app.services.persistence import log_security_event, save_statement
 from app.services.pipeline_engine import run_pipeline
+from app.services.security import guardrails, lineage
 from app.services.statement_parser import parse_statement
 from app.state.session_state import session_state
 
@@ -32,12 +33,31 @@ async def upload_file(sourceId: str = Form(...), file: UploadFile = File(...)):
         raise HTTPException(404, f"Data source '{sourceId}' not found.")
 
     buf = await file.read()
-    if not buf:
-        raise HTTPException(400, "No file uploaded.")
-
     file_name = file.filename or "upload.bin"
+
+    # ── Guardrail: size / type / content sniff on the raw upload ──────────
+    try:
+        guardrails.validate_upload(buf, file_name)
+    except guardrails.GuardrailError as exc:
+        log_security_event("guardrail", "block", f"upload:{file_name}", {"error": str(exc)})
+        raise HTTPException(422, f"Upload rejected: {exc}") from exc
+
     analysis  = analyze_file(buf, file_name)
-    parsed    = await parse_statement(buf, file_name)
+    try:
+        parsed = await parse_statement(buf, file_name)
+    except guardrails.GuardrailError as exc:
+        log_security_event("guardrail", "block", f"parse:{file_name}", {"error": str(exc)})
+        raise HTTPException(422, f"Statement rejected: {exc}") from exc
+
+    # ── Guardrail: schema + deterministic sanity of the parsed statement ──
+    parse_warnings: list[str] = []
+    try:
+        parsed, parse_warnings = guardrails.validate_llm_extraction(parsed)
+    except guardrails.GuardrailError as exc:
+        log_security_event("guardrail", "block", f"parse:{file_name}", {"error": str(exc)})
+        raise HTTPException(422, f"Statement rejected: {exc}") from exc
+    if parse_warnings:
+        log_security_event("guardrail", "warn", f"parse:{file_name}", {"warnings": parse_warnings})
 
     # For PDFs: override byte-entropy cleanliness with LLM extraction quality.
     # - 0 transactions → 10% (the LLM couldn't read anything meaningful)
@@ -65,13 +85,22 @@ async def upload_file(sourceId: str = Form(...), file: UploadFile = File(...)):
     session_state.parsed_statements[sourceId] = parsed
     session_state.persist()
 
-    statement_id = save_statement(sourceId, analysis, parsed)
+    # ── Data lineage: fingerprint the file + record which parser produced it
+    lin = {
+        "file_sha256": lineage.file_digest(buf),
+        "parse_confidence": lineage.extraction_confidence(parsed),
+        "parse_warnings": parse_warnings or None,
+        **lineage.parser_identity(),
+    }
+    statement_id = save_statement(sourceId, analysis, parsed, lineage=lin)
 
     return {
         "uploadedFiles": session_state.uploaded_files,
         "analysis": analysis,
         "statement": parsed,
         "statementId": statement_id,
+        "lineage": lin,
+        "guardrailWarnings": parse_warnings,
     }
 
 

@@ -1,17 +1,21 @@
-import random
+import json
+import time
+import urllib.error
+import urllib.request
 
 from fastapi import APIRouter
 from pydantic import BaseModel
 
+from app import config
 from app.state.ai_architecture_state import ai_architecture_state
 
 router = APIRouter(prefix="/ai-architecture", tags=["ai-architecture"])
 
 LLM_OPTIONS = [
-    {"value": "gemma", "label": "Gemma 2 (vLLM Engine)"},
-    {"value": "qwen", "label": "Qwen 2.5 (vLLM Engine)"},
-    {"value": "llama", "label": "Llama 3.1 8B (vLLM Engine)"},
-    {"value": "mistral", "label": "Mistral NeMo (vLLM Engine)"},
+    {"value": "gemma", "label": "Gemma 4 (Ollama)"},
+    {"value": "qwen", "label": "Qwen 2.5 VL (Ollama)"},
+    {"value": "llama", "label": "Llama 3.2 Vision (Ollama)"},
+    {"value": "mistral", "label": "Mistral (Ollama)"},
 ]
 
 
@@ -63,8 +67,6 @@ class VllmConfigBody(BaseModel):
     enabled: bool | None = None
     endpoint: str | None = None
     modelName: str | None = None
-    gpuCount: str | None = None
-    gpuMemoryUtil: str | None = None
 
 
 @router.put("/vllm")
@@ -76,19 +78,34 @@ async def update_vllm_config(body: VllmConfigBody):
         v["endpoint"] = body.endpoint.strip()
     if body.modelName and body.modelName.strip():
         v["modelName"] = body.modelName.strip()
-    if body.gpuCount is not None:
-        v["gpuCount"] = body.gpuCount
-    if body.gpuMemoryUtil is not None:
-        v["gpuMemoryUtil"] = body.gpuMemoryUtil
     return {"vllm": v}
 
 
 @router.post("/vllm/test")
 async def test_vllm_connection():
+    """Real connectivity check — hits Ollama's /api/tags and reports whether the
+    configured model is available, with the actual round-trip latency."""
     v = ai_architecture_state.vllm
     if not v["enabled"]:
         v["status"] = "disconnected"
-        return {"vllm": v, "latencyMs": None}
-    v["status"] = "connected"
-    latency_ms = 8 + random.randint(0, 12)
-    return {"vllm": v, "latencyMs": latency_ms}
+        return {"vllm": v, "latencyMs": None, "detail": "Engine disabled."}
+
+    host = (v["endpoint"] or config.OLLAMA_HOST).rstrip("/")
+    model = v["modelName"] or config.STATEMENT_LLM_MODEL
+    t0 = time.perf_counter()
+    try:
+        with urllib.request.urlopen(f"{host}/api/tags", timeout=8) as resp:
+            tags = json.loads(resp.read().decode("utf-8"))
+        latency_ms = round((time.perf_counter() - t0) * 1000)
+        names = {m.get("name", "") for m in tags.get("models", [])}
+        base = model.split(":")[0]
+        available = model in names or any(n.split(":")[0] == base for n in names)
+        v["status"] = "connected" if available else "model-missing"
+        detail = (
+            f"Ollama reachable ({len(names)} models). '{model}' "
+            + ("available." if available else "NOT pulled — run `ollama pull " + model + "`.")
+        )
+        return {"vllm": v, "latencyMs": latency_ms, "detail": detail}
+    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
+        v["status"] = "disconnected"
+        return {"vllm": v, "latencyMs": None, "detail": f"Cannot reach Ollama at {host} ({exc})."}

@@ -17,9 +17,9 @@ from datetime import datetime, timezone
 
 from app.data.underwriting_rules import (
     CREDIT_SCORE_GATE_RULE_ID,
-    CREDIT_SCORE_GATE_THRESHOLD,
     UNDERWRITING_RULE_CATEGORIES,
 )
+from app.state.settings_state import settings_state
 from app.services.inference_engine import (
     BOUNCE_RE,
     CASH_RE,
@@ -549,9 +549,9 @@ _EVALUATORS = {
 
     # ── Loan Eligibility & Decisioning ─────────────────────────────────
     CREDIT_SCORE_GATE_RULE_ID: lambda c, fv, r: (
-        _P(f"Credit score {r['score']} > {CREDIT_SCORE_GATE_THRESHOLD}.")
-        if r["score"] > CREDIT_SCORE_GATE_THRESHOLD
-        else _F(f"Credit score {r['score']} ≤ {CREDIT_SCORE_GATE_THRESHOLD} — hard cutoff.")
+        _P(f"Credit score {r['score']} > {settings_state.scoring.gate_threshold}.")
+        if r["score"] > settings_state.scoring.gate_threshold
+        else _F(f"Credit score {r['score']} ≤ {settings_state.scoring.gate_threshold} — hard cutoff.")
     ),
     "eligibility_strong_cashflow": lambda c, fv, r: (
         _P("Consistent revenue, positive surplus, EMI ≤ 40%, no bounces, healthy balance.")
@@ -652,7 +652,7 @@ def evaluate_bre_rules(
         "evaluatedAt": datetime.now(timezone.utc).isoformat(),
         "creditScore": risk["score"],
         "riskGrade": risk["grade"],
-        "gateThreshold": CREDIT_SCORE_GATE_THRESHOLD,
+        "gateThreshold": settings_state.scoring.gate_threshold,
         "gateEnabled": gate_enabled,
         "applicantProfile": "SALARIED" if c["is_salaried"] else "BUSINESS / SELF-EMPLOYED",
         "enabledCount": sum(1 for v in enabled_rules.values() if v),

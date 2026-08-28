@@ -5,7 +5,12 @@ from pydantic import BaseModel
 
 from app.data.model_catalog import MODEL_TEMPLATES
 from app.services.bre_engine import evaluate_bre_rules
-from app.services.persistence import save_bre_evaluation, save_inference_run
+from app.services.persistence import (
+    log_security_event,
+    save_bre_evaluation,
+    save_inference_run,
+)
+from app.services.security import guardrails, outliers
 from app.services.inference_engine import (
     apply_rule_engine,
     compute_credit_score,
@@ -42,12 +47,13 @@ def _build_bundle(model_id: str, custom_id: str, bank_name: str, source_id: str 
     has_real_data = bool(real_statement and real_statement["transactions"])
 
     stmt_summary = real_statement.get("summary", {}) if has_real_data else {}
-    # Prefer what the user typed; else use what was read off the statement.
+    file_name = (session_state.uploaded_files.get(source_id, {}) or {}).get("fileName") if source_id else None
+    # Prefer what the user typed; else what was read off the statement; else the file.
     effective_bank = (bank_name or "").strip() or stmt_summary.get("bankName") or ""
     account_holder = stmt_summary.get("accountHolder")
     effective_id = custom_id
-    if custom_id in ("applicant", "") and account_holder:
-        effective_id = account_holder
+    if custom_id in ("applicant", ""):
+        effective_id = account_holder or (file_name.rsplit(".", 1)[0] if file_name else custom_id)
 
     transactions = map_real_transactions(real_statement) if has_real_data else generate_transactions(custom_id)
     evaluation = generate_evaluation(custom_id, model_id)
@@ -61,8 +67,28 @@ def _build_bundle(model_id: str, custom_id: str, bank_name: str, source_id: str 
         anomalies = generate_anomalies(custom_id, transactions)
 
     real_feature_vector = compute_real_feature_vector(real_statement) if has_real_data else None
-    risk_score = compute_real_credit_score(real_feature_vector) if has_real_data else compute_credit_score(custom_id)
+
+    # ── Guardrail: keep the 11 underwriting features in valid ranges ─────
+    security: dict = {"guardrailStatus": "ok", "guardrailWarnings": [], "outlier": {}}
+    if real_feature_vector is not None:
+        real_feature_vector, gr_warn = guardrails.clamp_feature_vector(real_feature_vector)
+        if gr_warn:
+            security["guardrailStatus"] = "warn"
+            security["guardrailWarnings"] = gr_warn
+            log_security_event("guardrail", "warn", f"inference:{source_id}",
+                               {"feature_warnings": gr_warn})
+        # ── Outlier detection: is this vector within the scored population? ──
+        security["outlier"] = outliers.score(real_feature_vector)
+        if security["outlier"].get("isOutlier"):
+            log_security_event("outlier", "warn", f"inference:{source_id}",
+                               {"flags": security["outlier"]["flags"]})
+
+    risk_score = (
+        compute_real_credit_score(real_feature_vector, real_statement)
+        if has_real_data else compute_credit_score(custom_id)
+    )
     risk_score = apply_rule_engine(risk_score)
+    risk_score["score"] = guardrails.bound_score(risk_score.get("score"))
 
     # Always pass the (possibly rule-gated) risk_score through, for both real
     # and simulated data — otherwise the analytics chart / BRE payload would
@@ -85,6 +111,7 @@ def _build_bundle(model_id: str, custom_id: str, bank_name: str, source_id: str 
         "customId": custom_id,
         "bankName": effective_bank or None,
         "accountHolder": account_holder,
+        "fileName": file_name,
         "statementLabel": effective_id if effective_id != "applicant" else None,
         "dataSource": "UPLOADED_STATEMENT" if has_real_data else "SIMULATED",
         "transactions": transactions,
@@ -93,6 +120,7 @@ def _build_bundle(model_id: str, custom_id: str, bank_name: str, source_id: str 
         "evaluation": evaluation,
         "riskScore": risk_score,
         "brePayload": bre_payload,
+        "security": security,
     }
 
 
@@ -124,16 +152,34 @@ async def run_inference(body: RunInferenceBody):
     bundle = _build_bundle(body.modelId, body.customId.strip(), body.bankName.strip(), body.sourceId or None)
     save_inference_run(bundle, body.sourceId or None)
 
-    session_state.inference_history.insert(0, {
-        "id": bundle["customId"],
+    # Identifies the *person / statement* — a new applicant on the same feed is
+    # a NEW entry; re-running the same one just refreshes it.
+    person_key = (
+        bundle.get("accountHolder")
+        or bundle.get("fileName")
+        or bundle.get("statementLabel")
+        or f"{body.sourceId}:{body.customId}"
+    )
+    entry = {
+        "id": bundle.get("statementLabel") or bundle.get("accountHolder") or bundle["customId"],
         "bank": bundle["bankName"] or "Not Specified",
+        "personKey": person_key,
+        "modelId": body.modelId,
         "date": datetime.now(timezone.utc).isoformat(),
         "txCount": len(bundle["transactions"]),
         "riskScore": bundle["riskScore"]["score"],
-        "grade": bundle["riskScore"]["grade"],
+        "grade": bundle["riskScore"].get("gradeRaw") or bundle["riskScore"]["grade"],
+        "decision": bundle["riskScore"].get("decision"),
         "status": "ANALYZED",
-    })
-    session_state.inference_history = session_state.inference_history[:25]
+    }
+    # One entry per person (across models) — drop any prior entry for the same
+    # person so re-runs don't pile up, but keep every distinct applicant.
+    session_state.inference_history = [
+        h for h in session_state.inference_history if h.get("personKey") != person_key
+    ]
+    session_state.inference_history.insert(0, entry)
+    session_state.inference_history = session_state.inference_history[:50]
+    session_state.persist()
 
     return bundle
 
@@ -167,7 +213,7 @@ async def run_bre_rules(body: BreRulesBody):
         }
 
     fv = compute_real_feature_vector(real_statement)
-    risk = apply_rule_engine(compute_real_credit_score(fv))
+    risk = apply_rule_engine(compute_real_credit_score(fv, real_statement))
     opening_balance = (real_statement.get("summary") or {}).get("openingBalance")
 
     result = evaluate_bre_rules(

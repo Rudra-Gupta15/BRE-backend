@@ -13,7 +13,10 @@ logger = logging.getLogger(__name__)
 
 # Backend/.session_cache.json  (gitignored)
 _CACHE_FILE = Path(__file__).resolve().parents[2] / ".session_cache.json"
-_PERSISTED_KEYS = ("selected_ids", "custom_sources", "uploaded_files", "parsed_statements", "pipeline")
+_PERSISTED_KEYS = (
+    "selected_ids", "custom_sources", "uploaded_files", "parsed_statements",
+    "pipeline", "inference_history",
+)
 
 
 def _default_pipeline():

@@ -281,6 +281,10 @@ def _parse_pdf_statement(buf: bytes) -> dict:
     """
     doc = fitz.open(stream=buf, filetype="pdf")
     try:
+        # Guardrail: page-count cap + encryption check before we render anything.
+        from app.services.security import guardrails
+        guardrails.validate_pdf(doc)
+
         text_result = _try_text_extraction(doc)
         if text_result is not None:
             return text_result
@@ -517,6 +521,8 @@ async def parse_statement(buf: bytes, file_name: str) -> dict:
     PDF  → selectable-text extraction, then vision LLM for scanned PDFs.
     CSV/TSV/TXT → column/heuristic text parser.
     """
+    from app.services.security.guardrails import GuardrailError
+
     ext = (file_name.rsplit(".", 1)[-1] if "." in file_name else "").lower()
     try:
         if ext in ("csv", "tsv", "txt"):
@@ -528,6 +534,8 @@ async def parse_statement(buf: bytes, file_name: str) -> dict:
             # — for the entire scan. Push it to a worker thread so the rest of
             # the API stays responsive.
             return await asyncio.to_thread(_parse_pdf_statement, buf)
+    except GuardrailError:
+        raise  # let the router turn this into a 422
     except Exception as err:  # noqa: BLE001
         logger.exception("Statement parse failed for %s", file_name)
         result = _empty_result()
