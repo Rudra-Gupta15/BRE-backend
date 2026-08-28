@@ -146,6 +146,34 @@ class InferenceRun(Base):
     )
 
 
+class TestHistory(Base):
+    """Persistent Model Testing history — ONE row per application (not per model).
+    A re-test of the same application updates its row in place. Never cleared by
+    /reset. `result_bundle` holds the last full analysis so the row can be
+    reopened."""
+    __tablename__ = "test_history"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    applicant_key: Mapped[str | None] = mapped_column(String(200), index=True)  # dedup key (one row per application)
+    ref_id: Mapped[str | None] = mapped_column(String(120))          # user-typed Application / Ref ID
+    applicant_name: Mapped[str | None] = mapped_column(String(160))  # account holder / statement label
+    bank_name: Mapped[str | None] = mapped_column(String(120))
+    model_id: Mapped[str | None] = mapped_column(String(64), index=True)
+    model_name: Mapped[str | None] = mapped_column(String(80))
+    model_version: Mapped[str | None] = mapped_column(String(16))
+    data_source: Mapped[str | None] = mapped_column(String(32))      # UPLOADED_STATEMENT / SIMULATED
+    credit_score: Mapped[int | None] = mapped_column(Integer)
+    risk_grade: Mapped[str | None] = mapped_column(String(16))
+    decision: Mapped[str | None] = mapped_column(String(32))
+    transaction_count: Mapped[int | None] = mapped_column(Integer)
+    source_id: Mapped[str | None] = mapped_column(String(64))
+    custom_id: Mapped[str | None] = mapped_column(String(120))       # customId used for the run
+    file_name: Mapped[str | None] = mapped_column(String(255))
+    result_bundle: Mapped[dict | None] = mapped_column(JSON)         # full last analysis — to reopen
+    first_tested_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    tested_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, index=True)
+
+
 class BreEvaluation(Base):
     __tablename__ = "bre_evaluations"
 

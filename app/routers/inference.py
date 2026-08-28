@@ -6,7 +6,10 @@ from pydantic import BaseModel
 from app.data.model_catalog import MODEL_TEMPLATES
 from app.services.bre_engine import evaluate_bre_rules
 from app.services.persistence import (
+    get_test_history_bundle,
+    list_test_history,
     log_security_event,
+    record_test_history,
     save_bre_evaluation,
     save_inference_run,
 )
@@ -43,11 +46,14 @@ def _build_bundle(model_id: str, custom_id: str, bank_name: str, source_id: str 
     model = _resolve_model(model_id)
     version = models_state.selected_version_map.get(model_id, "v3.4")
 
-    real_statement = session_state.parsed_statements.get(source_id) if source_id else None
+    # Inference always runs against the Model Testing page's own upload, never
+    # Model Hub's — the two are deliberately isolated.
+    real_statement = session_state.merged_statement_for(source_id, "testing") if source_id else None
     has_real_data = bool(real_statement and real_statement["transactions"])
 
     stmt_summary = real_statement.get("summary", {}) if has_real_data else {}
-    file_name = (session_state.uploaded_files.get(source_id, {}) or {}).get("fileName") if source_id else None
+    _first_file = (session_state.files_for(source_id, "testing")[:1] or [{}])[0] if source_id else {}
+    file_name = _first_file.get("fileName")
     # Prefer what the user typed; else what was read off the statement; else the file.
     effective_bank = (bank_name or "").strip() or stmt_summary.get("bankName") or ""
     account_holder = stmt_summary.get("accountHolder")
@@ -140,6 +146,10 @@ class RunInferenceBody(BaseModel):
     customId: str = "applicant"
     bankName: str = ""
     sourceId: str = ""
+    # True only for a deliberate run (file upload / Run Analysis click) — those
+    # get appended to the persistent test_history. The incidental re-fires
+    # (model switch, typing in the ref-id box) leave it False.
+    record: bool = False
 
 
 @router.post("/run")
@@ -151,6 +161,10 @@ async def run_inference(body: RunInferenceBody):
 
     bundle = _build_bundle(body.modelId, body.customId.strip(), body.bankName.strip(), body.sourceId or None)
     save_inference_run(bundle, body.sourceId or None)
+
+    if body.record:
+        _first = (session_state.files_for(body.sourceId, "testing")[:1] or [{}])[0] if body.sourceId else {}
+        record_test_history(bundle, body.sourceId or None, _first.get("fileName"), body.customId.strip())
 
     # Identifies the *person / statement* — a new applicant on the same feed is
     # a NEW entry; re-running the same one just refreshes it.
@@ -205,7 +219,7 @@ async def run_bre_rules(body: BreRulesBody):
     """Evaluates every BRE rule currently enabled on the Settings page against
     the applicant's real uploaded statement + derived feature vector + credit
     score, returning PASS / FAIL / SKIP per rule and an overall decision."""
-    real_statement = session_state.parsed_statements.get(body.sourceId) if body.sourceId else None
+    real_statement = session_state.merged_statement_for(body.sourceId, "testing") if body.sourceId else None
     if not (real_statement and real_statement.get("transactions")):
         return {
             "available": False,
@@ -226,4 +240,17 @@ async def run_bre_rules(body: BreRulesBody):
 
 @router.get("/history")
 async def get_history():
-    return {"history": session_state.inference_history}
+    """Test history — one row per tested application, newest first. Reads the
+    persistent test_history table when the DB is on; falls back to the in-memory
+    session log otherwise."""
+    db_history = list_test_history()
+    return {"history": db_history if db_history else session_state.inference_history}
+
+
+@router.get("/history/{row_id}")
+async def get_history_entry(row_id: int):
+    """The stored analysis for one history row — reopens that application's output."""
+    bundle = get_test_history_bundle(row_id)
+    if bundle is None:
+        raise HTTPException(404, "No stored result for that history entry.")
+    return bundle

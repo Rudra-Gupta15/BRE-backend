@@ -24,7 +24,7 @@ MAX_UPLOAD_BYTES = int(os.environ.get("MAX_UPLOAD_BYTES", str(15 * 1024 * 1024))
 MAX_PDF_PAGES = int(os.environ.get("MAX_PDF_PAGES", "60"))
 MAX_TRANSACTIONS = int(os.environ.get("MAX_TRANSACTIONS", "5000"))
 ALLOWED_UPLOAD_EXT = tuple(
-    e.strip().lower() for e in os.environ.get("ALLOWED_UPLOAD_EXT", "pdf,csv,tsv,txt").split(",") if e.strip()
+    e.strip().lower() for e in os.environ.get("ALLOWED_UPLOAD_EXT", "pdf,csv,tsv,txt,json,md,xlsx").split(",") if e.strip()
 )
 
 # Training-data poisoning guard: a candidate model may not regress the active

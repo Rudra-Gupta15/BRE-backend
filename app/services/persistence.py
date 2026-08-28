@@ -28,6 +28,7 @@ from app.models_db import (
     ModelVersion,
     SecurityEvent,
     Statement,
+    TestHistory,
     TrainedModel,
     Transaction,
 )
@@ -239,6 +240,124 @@ def save_inference_run(bundle: dict, source_id: str | None) -> int | None:
     except Exception:  # noqa: BLE001
         session.rollback()
         logger.exception("save_inference_run failed")
+        return None
+    finally:
+        session.close()
+
+
+def _applicant_key(bundle: dict, custom_id: str | None, file_name: str | None, source_id: str | None) -> str:
+    """Stable per-APPLICATION key — a re-test of the same application updates its
+    one history row rather than adding a new one."""
+    typed = (custom_id or "").strip()
+    if typed and typed.lower() not in ("applicant", ""):
+        return f"ref:{typed.lower()}"
+    holder = (bundle.get("accountHolder") or bundle.get("statementLabel") or "").strip()
+    if holder:
+        return f"name:{holder.lower()}"
+    if file_name:
+        return f"file:{file_name.rsplit('.', 1)[0].strip().lower()}"
+    return f"src:{source_id or 'unknown'}"
+
+
+def record_test_history(bundle: dict, source_id: str | None, file_name: str | None,
+                        custom_id: str | None = None) -> None:
+    """Upsert the persistent Model Testing history — ONE row per application.
+    Called only on deliberate runs (upload / Run Analysis)."""
+    if not db.DB_ENABLED:
+        return
+    session = get_session()
+    if session is None:
+        return
+    try:
+        risk = bundle.get("riskScore", {}) or {}
+        model = bundle.get("model", {}) or {}
+        key = _applicant_key(bundle, custom_id, file_name, source_id)
+        fields = dict(
+            ref_id=(bundle.get("brePayload", {}) or {}).get("statement_id"),
+            applicant_name=bundle.get("accountHolder") or bundle.get("statementLabel"),
+            bank_name=bundle.get("bankName"),
+            model_id=model.get("id"),
+            model_name=model.get("name"),
+            model_version=model.get("version"),
+            data_source=bundle.get("dataSource"),
+            credit_score=risk.get("score"),
+            risk_grade=risk.get("gradeRaw") or risk.get("grade"),
+            decision=risk.get("decision"),
+            transaction_count=len(bundle.get("transactions") or []),
+            source_id=source_id,
+            custom_id=custom_id,
+            file_name=file_name,
+            result_bundle=bundle,
+            tested_at=_now(),
+        )
+        existing = session.scalar(select(TestHistory).where(TestHistory.applicant_key == key))
+        if existing is not None:
+            for k, v in fields.items():
+                setattr(existing, k, v)
+        else:
+            session.add(TestHistory(applicant_key=key, first_tested_at=_now(), **fields))
+        session.commit()
+    except Exception:  # noqa: BLE001
+        session.rollback()
+        logger.exception("record_test_history failed")
+    finally:
+        session.close()
+
+
+def list_test_history(limit: int = 1000) -> list[dict]:
+    """One row per tested application, newest first. Empty when the DB is off."""
+    if not db.DB_ENABLED:
+        return []
+    session = get_session()
+    if session is None:
+        return []
+    try:
+        rows = session.scalars(
+            select(TestHistory)
+            .where(TestHistory.applicant_key.is_not(None))
+            .order_by(TestHistory.tested_at.desc())
+            .limit(limit)
+        ).all()
+        out = []
+        for r in rows:
+            label = r.ref_id or r.applicant_name
+            if not label and r.file_name:
+                label = r.file_name.rsplit(".", 1)[0]
+            out.append({
+                "rowId": r.id,
+                "id": label or "—",
+                "bank": r.bank_name or "—",
+                "modelId": r.model_id,
+                "model": r.model_name or r.model_id or "—",
+                "version": r.model_version,
+                "dataSource": r.data_source,
+                "riskScore": r.credit_score,
+                "grade": r.risk_grade,
+                "decision": r.decision,
+                "txCount": r.transaction_count,
+                "date": r.tested_at.isoformat() if r.tested_at else None,
+                "status": "ANALYZED",
+            })
+        return out
+    except Exception:  # noqa: BLE001
+        logger.exception("list_test_history failed")
+        return []
+    finally:
+        session.close()
+
+
+def get_test_history_bundle(row_id: int) -> dict | None:
+    """The full stored analysis for one history row — to reopen its output."""
+    if not db.DB_ENABLED:
+        return None
+    session = get_session()
+    if session is None:
+        return None
+    try:
+        r = session.get(TestHistory, row_id)
+        return r.result_bundle if r else None
+    except Exception:  # noqa: BLE001
+        logger.exception("get_test_history_bundle failed")
         return None
     finally:
         session.close()

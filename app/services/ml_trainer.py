@@ -463,7 +463,15 @@ def train_models_live(algorithm: str, parsed_statements: dict) -> dict:
     merged_summary = {"totalDebit": 0.0, "totalCredit": 0.0,
                       "openingBalance": None, "closingBalance": None}
 
-    for stmt in (parsed_statements or {}).values():
+    # Each source holds a folder of files → parsed_statements[sid] is a list of
+    # statements. Flatten across every file of every source and train on all.
+    _all_stmts = []
+    for _v in (parsed_statements or {}).values():
+        _all_stmts.extend(_v if isinstance(_v, list) else [_v])
+
+    for stmt in _all_stmts:
+        if not stmt:
+            continue
         txns = stmt.get("transactions") or []
         all_txns.extend(txns)
         s = stmt.get("summary", {})

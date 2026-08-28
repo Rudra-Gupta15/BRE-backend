@@ -58,10 +58,12 @@ def validate_upload(buf: bytes, file_name: str) -> str:
     # light content sniff - the bytes should look like what the name claims
     if ext == "pdf" and not buf.lstrip()[:1024].startswith(_PDF_MAGIC):
         raise GuardrailError("file is named .pdf but is not a PDF")
-    if ext in ("csv", "tsv", "txt"):
+    if ext in ("csv", "tsv", "txt", "json", "md"):
         sample = buf[:4096]
         if b"\x00" in sample:
             raise GuardrailError(f"file is named .{ext} but contains binary data")
+    if ext == "xlsx" and not buf[:2] == b"PK":
+        raise GuardrailError("file is named .xlsx but is not a valid workbook")
     return ext
 
 
@@ -123,14 +125,14 @@ def validate_llm_extraction(parsed: dict) -> tuple[dict, list[str]]:
     parsed["transactions"] = clean
     summary = parsed.get("summary") or {}
 
-    # Deterministic cross-check: don't trust the LLM's own totals.
+    # Deterministic cross-check: don't trust the AI's own totals.
     for key, computed in (("totalCredit", credit_sum), ("totalDebit", debit_sum)):
         reported = _to_float(summary.get(key))
         if reported is not None and computed > 0:
             drift = abs(reported - computed) / computed
             if drift > 0.02:
                 warnings.append(
-                    f"{key}: LLM said {reported:,.0f}, transactions sum to {computed:,.0f} "
+                    f"{key}: AI said {reported:,.0f}, transactions sum to {computed:,.0f} "
                     f"({drift * 100:.0f}% off) - using the computed value"
                 )
         summary[key] = round(computed, 2)

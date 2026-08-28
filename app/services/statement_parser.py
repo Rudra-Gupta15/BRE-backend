@@ -294,7 +294,7 @@ def _parse_pdf_statement(buf: bytes) -> dict:
             return llm_result
 
         result = _empty_result()
-        result["error"] = "Could not extract transactions from this PDF (tried text + vision LLM)."
+        result["error"] = "Could not extract transactions from this PDF (tried text + vision AI)."
         return result
     finally:
         doc.close()
@@ -396,8 +396,16 @@ def _parse_csv_statement(text: str) -> dict:
             header_i = i
             break
 
-    delimiter = "\t" if "\t" in lines[header_i] else ","
-    header    = [h.strip().lower() for h in lines[header_i].split(delimiter)]
+    hdr = lines[header_i]
+    if "\t" in hdr:
+        delimiter = "\t"
+    elif "|" in hdr:
+        delimiter = "|"
+    elif hdr.count(";") > hdr.count(","):
+        delimiter = ";"
+    else:
+        delimiter = ","
+    header = [h.strip().lower() for h in hdr.split(delimiter)]
 
     def find_col(keywords: list[str]) -> int:
         for i, h in enumerate(header):
@@ -422,8 +430,8 @@ def _parse_csv_statement(text: str) -> dict:
 
     transactions = []
     for line in lines[header_i + 1:]:
-        cells  = [c.strip() for c in line.split(delimiter)]
-        if len(cells) < 2:
+        cells  = [c.strip().strip("|").strip() for c in line.split(delimiter)]
+        if len(cells) < 2 or re.fullmatch(r"[\s:|\-]+", line):
             continue
 
         debit   = parse_num(cells, debit_idx)
@@ -443,13 +451,16 @@ def _parse_csv_statement(text: str) -> dict:
             continue
 
         transactions.append({
-            "date":      cells[date_idx]      if date_idx      >= 0 else None,
-            "narration": cells[narration_idx] if narration_idx >= 0 else line[:120],
+            "date":      cells[date_idx]      if 0 <= date_idx < len(cells)      else None,
+            "narration": cells[narration_idx] if 0 <= narration_idx < len(cells) else line[:120],
             "type":      tx_type,
             "amount":    value,
             "balance":   balance,
         })
 
+    # Delimited parse found nothing — fall back to the free-text heuristic.
+    if not transactions:
+        return _parse_statement_text(text)
     return _summarize(transactions, text)
 
 
@@ -513,13 +524,131 @@ def _parse_statement_text(text: str) -> dict:
     return _summarize(transactions, text)
 
 
+# ── JSON / Markdown / XLSX statements ─────────────────────────────────────────
+
+def _num(x):
+    try:
+        return float(str(x).replace(",", "").replace("₹", "").replace("Rs.", "").strip())
+    except (TypeError, ValueError):
+        return None
+
+
+def _dict_pick(d: dict, wants: list[str]):
+    for k, v in d.items():
+        kl = re.sub(r"[^a-z]", "", k.lower())
+        if any(w in kl for w in wants):
+            return v
+    return None
+
+
+def _first_list_of_dicts(obj):
+    if isinstance(obj, list) and obj and isinstance(obj[0], dict):
+        return obj
+    if isinstance(obj, dict):
+        for v in obj.values():
+            found = _first_list_of_dicts(v)
+            if found:
+                return found
+    return None
+
+
+def _parse_json_statement(raw: str) -> dict:
+    """Flexible JSON parser — a bare array of transaction objects, a
+    {transactions: [...]} wrapper, or an Account-Aggregator-style nested payload.
+    Field names are matched fuzzily (date/valueDate/txnDate, amount/txnAmount,
+    narration/description/remarks, type/drCr, balance/currentBalance …)."""
+    try:
+        data = json.loads(raw)
+    except (json.JSONDecodeError, ValueError) as exc:
+        r = _empty_result()
+        r["error"] = f"invalid JSON ({exc})"
+        return r
+
+    rows = None
+    if isinstance(data, list):
+        rows = data
+    elif isinstance(data, dict):
+        for key in ("transactions", "txns", "entries", "data", "statement", "rows"):
+            for k in data:
+                if k.lower() == key and isinstance(data[k], list):
+                    rows = data[k]
+                    break
+            if rows:
+                break
+        if rows is None:
+            rows = _first_list_of_dicts(data)
+
+    if not rows:
+        return _empty_result()
+
+    txns: list[dict] = []
+    for it in rows:
+        if not isinstance(it, dict):
+            continue
+        date = _dict_pick(it, ["valuedate", "txndate", "transactiondate", "date", "postingdate"])
+        narr = _dict_pick(it, ["narration", "description", "remarks", "particulars", "details", "reference"])
+        bal  = _num(_dict_pick(it, ["currentbalance", "runningbalance", "closingbalance", "balance"]))
+        amt  = _num(_dict_pick(it, ["amount", "txnamount", "transactionamount", "value"]))
+        debit  = _num(_dict_pick(it, ["debit", "withdrawal", "withdrawalamt"]))
+        credit = _num(_dict_pick(it, ["credit", "deposit", "depositamt"]))
+        typ    = str(_dict_pick(it, ["type", "drcr", "crdr", "transactiontype", "indicator"]) or "").upper()
+
+        if debit and debit > 0:
+            tx_type, value = "DEBIT", debit
+        elif credit and credit > 0:
+            tx_type, value = "CREDIT", credit
+        elif amt is not None:
+            is_debit = amt < 0 or typ.startswith(("D", "W")) or "DEBIT" in typ or "DR" == typ
+            tx_type, value = ("DEBIT" if is_debit else "CREDIT"), abs(amt)
+        else:
+            continue
+
+        txns.append({
+            "date":      str(date) if date not in (None, "") else None,
+            "narration": (str(narr)[:120] if narr else "Transaction"),
+            "type":      tx_type,
+            "amount":    value,
+            "balance":   bal,
+        })
+    return _summarize(txns, raw)
+
+
+def _parse_markdown_statement(text: str) -> dict:
+    """Pull the pipe-table out of a Markdown statement and reuse the delimited
+    parser; fall back to the free-text heuristic if there's no usable table."""
+    rows = [l.strip().strip("|").strip() for l in text.splitlines() if l.count("|") >= 2]
+    rows = [r for r in rows if not re.fullmatch(r"[\s:|\-]+", r)]
+    if len(rows) >= 2:
+        res = _parse_csv_statement("\n".join(r.replace("|", "\t") for r in rows))
+        if res["transactions"]:
+            return res
+    return _parse_statement_text(text)
+
+
+def _parse_xlsx_statement(buf: bytes) -> dict:
+    """First sheet of an .xlsx workbook → CSV → the delimited parser."""
+    import io
+
+    import pandas as pd
+    try:
+        df = pd.read_excel(io.BytesIO(buf), dtype=str).fillna("")
+    except Exception as exc:  # noqa: BLE001 — openpyxl / format errors
+        r = _empty_result()
+        r["error"] = f"could not read XLSX ({exc})"
+        return r
+    return _parse_csv_statement(df.to_csv(index=False))
+
+
 # ── Public entry point ────────────────────────────────────────────────────────
 
 async def parse_statement(buf: bytes, file_name: str) -> dict:
     """
     Dispatches to the correct parser based on file extension.
-    PDF  → selectable-text extraction, then vision LLM for scanned PDFs.
-    CSV/TSV/TXT → column/heuristic text parser.
+    PDF        → selectable-text extraction, then vision LLM for scanned PDFs.
+    CSV/TSV/TXT → column parser (tab/comma/semicolon/pipe), text-heuristic fallback.
+    JSON       → flexible field-matching parser (array / wrapper / AA payload).
+    MD         → the pipe-table, else the text heuristic.
+    XLSX       → first sheet via pandas → the column parser.
     """
     from app.services.security.guardrails import GuardrailError
 
@@ -527,6 +656,12 @@ async def parse_statement(buf: bytes, file_name: str) -> dict:
     try:
         if ext in ("csv", "tsv", "txt"):
             return _parse_csv_statement(buf.decode("utf-8", errors="replace"))
+        if ext == "json":
+            return _parse_json_statement(buf.decode("utf-8", errors="replace"))
+        if ext == "md":
+            return _parse_markdown_statement(buf.decode("utf-8", errors="replace"))
+        if ext == "xlsx":
+            return await asyncio.to_thread(_parse_xlsx_statement, buf)
         if ext == "pdf":
             # _parse_pdf_statement does blocking PDF rendering and a blocking
             # urllib call to Ollama. Running it inline would freeze the whole
@@ -542,3 +677,4 @@ async def parse_statement(buf: bytes, file_name: str) -> dict:
         result["error"] = str(err)
         return result
     return _empty_result()
+
