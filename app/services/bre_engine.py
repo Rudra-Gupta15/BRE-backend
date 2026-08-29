@@ -211,6 +211,7 @@ def _build_context(fv: dict, risk: dict, transactions: list[dict], opening_balan
         "gst_count": len(gst_txns), "monthly_gst": monthly_gst,
         "tax_count": len(tax_txns),
         "rent_count": len(rent_txns), "monthly_rent": monthly_rent,
+        "util_count": len(util_txns),
         "fixed_burden": fixed_burden, "fixed_burden_ratio": _ratio(fixed_burden, fv.get("avg_monthly_inflow") or 0),
         "salary_in_count": len(salary_in),
         "upi_credit_count": len(upi_credits), "upi_credit_amt": sum(t["amount"] for t in upi_credits),

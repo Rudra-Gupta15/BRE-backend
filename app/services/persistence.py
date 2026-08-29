@@ -261,7 +261,9 @@ def _applicant_key(bundle: dict, custom_id: str | None, file_name: str | None, s
 
 def record_test_history(bundle: dict, source_id: str | None, file_name: str | None,
                         custom_id: str | None = None) -> None:
-    """Upsert the persistent Model Testing history — ONE row per application.
+    """Upsert the persistent Model Testing history — ONE row per (application,
+    model). Re-testing the same application with the same model updates that row;
+    a different model on the same application adds a new row.
     Called only on deliberate runs (upload / Run Analysis)."""
     if not db.DB_ENABLED:
         return
@@ -290,7 +292,10 @@ def record_test_history(bundle: dict, source_id: str | None, file_name: str | No
             result_bundle=bundle,
             tested_at=_now(),
         )
-        existing = session.scalar(select(TestHistory).where(TestHistory.applicant_key == key))
+        existing = session.scalar(select(TestHistory).where(
+            TestHistory.applicant_key == key,
+            TestHistory.model_id == model.get("id"),
+        ))
         if existing is not None:
             for k, v in fields.items():
                 setattr(existing, k, v)

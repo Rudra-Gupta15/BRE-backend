@@ -135,7 +135,7 @@ def _call_ollama_vision(image_b64: str) -> dict | None:
     non-JSON response.
     """
     payload = json.dumps({
-        "model":  OLLAMA_MODEL,
+        "model":  config.active_vision_model(),
         "stream": False,
         "messages": [
             {"role": "system", "content": _SYSTEM_PROMPT},
@@ -209,7 +209,7 @@ def _try_text_extraction(doc) -> dict | None:
 def _llm_vision_extraction(doc) -> dict:
     """Scanned/image-PDF path: send each rendered page to the vision LLM
     (Gemma 4 via Ollama Cloud by default) and merge the JSON it returns."""
-    logger.info("Scanning PDF with vision LLM (%s)…", OLLAMA_MODEL)
+    logger.info("Scanning PDF with vision LLM (%s)…", config.active_vision_model())
     mat = fitz.Matrix(PAGE_DPI / 72, PAGE_DPI / 72)
 
     all_transactions: list[dict] = []
@@ -419,6 +419,8 @@ def _parse_csv_statement(text: str) -> dict:
     credit_idx    = find_col(["credit", "deposit"])
     balance_idx   = find_col(["balance"])
     amount_idx    = find_col(["amount"])
+    # A single "Type" / "Dr/Cr" / "Indicator" column paired with one Amount column.
+    type_idx      = find_col(["dr/cr", "cr/dr", "drcr", "type", "indicator", "txn type", "transaction type"])
 
     def parse_num(cells: list[str], idx: int):
         if idx < 0 or idx >= len(cells) or not cells[idx]:
@@ -446,7 +448,12 @@ def _parse_csv_statement(text: str) -> dict:
         elif credit is not None and credit > 0:
             tx_type, value = "CREDIT", credit
         elif amount is not None:
-            tx_type, value = ("DEBIT" if amount < 0 else "CREDIT"), abs(amount)
+            if 0 <= type_idx < len(cells) and cells[type_idx]:
+                t = cells[type_idx].strip().upper()
+                is_debit = t.startswith(("D", "W")) or t in ("DR", "DEBIT", "WITHDRAWAL")
+                tx_type, value = ("DEBIT" if is_debit else "CREDIT"), abs(amount)
+            else:
+                tx_type, value = ("DEBIT" if amount < 0 else "CREDIT"), abs(amount)
         if value is None:
             continue
 

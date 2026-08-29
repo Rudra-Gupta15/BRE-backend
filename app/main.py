@@ -8,6 +8,7 @@ from app.db import init_db
 from app.routers import (
     ai_architecture,
     auth,
+    bre_products,
     dashboard,
     data_sources,
     inference,
@@ -61,6 +62,7 @@ app.include_router(data_sources.router, prefix="/api")
 app.include_router(pipeline.router, prefix="/api")
 app.include_router(models.router, prefix="/api")
 app.include_router(inference.router, prefix="/api")
+app.include_router(bre_products.router, prefix="/api")
 app.include_router(ai_architecture.router, prefix="/api")
 app.include_router(settings.router, prefix="/api")
 app.include_router(dashboard.router, prefix="/api")

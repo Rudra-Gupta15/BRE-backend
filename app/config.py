@@ -18,6 +18,19 @@ STATEMENT_LLM_TIMEOUT = int(os.environ.get("STATEMENT_LLM_TIMEOUT", "120"))  # s
 STATEMENT_LLM_DPI = int(os.environ.get("STATEMENT_LLM_DPI", "150"))
 STATEMENT_PARSER_VERSION = os.environ.get("STATEMENT_PARSER_VERSION", "2026.08-vision")
 
+# Runtime override of the vision model — set when the user picks a locally
+# installed model on the AI Intelligence page. `None` → fall back to the env.
+_RUNTIME_VISION_MODEL: str | None = None
+
+
+def set_vision_model(name: str | None) -> None:
+    global _RUNTIME_VISION_MODEL
+    _RUNTIME_VISION_MODEL = (name or "").strip() or None
+
+
+def active_vision_model() -> str:
+    return _RUNTIME_VISION_MODEL or STATEMENT_LLM_MODEL
+
 # ── ML-security guardrails ──────────────────────────────────────────────────
 # Upload limits (0 disables a check).
 MAX_UPLOAD_BYTES = int(os.environ.get("MAX_UPLOAD_BYTES", str(15 * 1024 * 1024)))  # 15 MB

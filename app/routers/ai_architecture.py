@@ -18,11 +18,87 @@ LLM_OPTIONS = [
     {"value": "mistral", "label": "Mistral (Ollama)"},
 ]
 
+# Model families / name fragments that indicate a vision-capable model.
+_VISION_FAMILIES = {
+    "clip", "mllama", "qwen2vl", "qwen2.5vl", "gemma3", "llava", "minicpmv",
+    "llama4", "siglip", "pixtral", "internvl", "moondream", "phi3v",
+}
+_VISION_NAME_HINTS = ("vl", "vision", "llava", "bakllava", "moondream", "minicpm-v", "pixtral", "-v")
+
+
+def _looks_vision(name: str, m: dict) -> bool:
+    low = name.lower()
+    if any(h in low for h in _VISION_NAME_HINTS):
+        return True
+    fams = {f.lower() for f in (m.get("details") or {}).get("families") or []}
+    return bool(fams & _VISION_FAMILIES)
+
+
+def _show_is_vision(host: str, name: str) -> bool:
+    """Authoritative check on newer Ollama — /api/show returns `capabilities`."""
+    try:
+        req = urllib.request.Request(
+            f"{host}/api/show",
+            data=json.dumps({"model": name}).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=6) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError):
+        return False
+    if "vision" in [c.lower() for c in data.get("capabilities") or []]:
+        return True
+    fams = {f.lower() for f in (data.get("details") or {}).get("families") or []}
+    return bool(fams & _VISION_FAMILIES)
+
+
+@router.get("/local-models")
+async def list_local_models():
+    """Scan the machine's Ollama install and return the vision-capable models."""
+    host = (ai_architecture_state.vllm.get("endpoint") or config.OLLAMA_HOST).rstrip("/")
+    try:
+        with urllib.request.urlopen(f"{host}/api/tags", timeout=8) as resp:
+            tags = json.loads(resp.read().decode("utf-8"))
+    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
+        return {"available": False, "host": host, "models": [],
+                "detail": f"Cannot reach Ollama at {host} — is it running? ({exc})"}
+
+    installed = tags.get("models", [])
+    vision = []
+    for m in installed:
+        name = m.get("name") or m.get("model") or ""
+        if not name:
+            continue
+        if not (_looks_vision(name, m) or _show_is_vision(host, name)):
+            continue
+        size = m.get("size") or 0
+        details = m.get("details") or {}
+        vision.append({
+            "value": name,
+            "label": name,
+            "family": details.get("family") or "",
+            "params": details.get("parameter_size"),
+            "sizeGB": round(size / 1e9, 1) if size else None,
+        })
+    return {
+        "available": True, "host": host,
+        "models": vision,
+        "installedCount": len(installed),
+        "detail": (
+            f"{len(vision)} vision model(s) of {len(installed)} installed at {host}."
+            if vision else
+            f"No vision models among {len(installed)} installed at {host} — "
+            "try `ollama pull qwen2.5vl` or `ollama pull llama3.2-vision`."
+        ),
+    }
+
 
 @router.get("")
 async def get_ai_architecture():
     return {
         "selectedLLM": ai_architecture_state.selected_llm,
+        "activeVisionModel": config.active_vision_model(),
         "dataExtracted": ai_architecture_state.data_extracted,
         "cleanlinessPercent": ai_architecture_state.cleanliness_percent,
         "vllm": ai_architecture_state.vllm,
@@ -36,9 +112,15 @@ class SelectedLLMBody(BaseModel):
 
 @router.put("/llm")
 async def set_selected_llm(body: SelectedLLMBody):
-    if body.selectedLLM and any(o["value"] == body.selectedLLM for o in LLM_OPTIONS):
-        ai_architecture_state.selected_llm = body.selectedLLM
-    return {"selectedLLM": ai_architecture_state.selected_llm}
+    val = (body.selectedLLM or "").strip()
+    if val:
+        ai_architecture_state.selected_llm = val
+        # A real Ollama model tag (has ':' or '/') → use it for PDF parsing.
+        config.set_vision_model(val if (":" in val or "/" in val) else None)
+    return {
+        "selectedLLM": ai_architecture_state.selected_llm,
+        "activeVisionModel": config.active_vision_model(),
+    }
 
 
 @router.post("/extract")
