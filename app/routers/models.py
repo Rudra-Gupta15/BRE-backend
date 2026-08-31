@@ -45,6 +45,38 @@ async def list_algorithms():
 class TrainBody(BaseModel):
     algorithm: str = "gradient_boosting"
     datasetFile: str = "processed_features_vector.csv"
+    sourceId: str | None = None   # scope training to one data source
+
+
+def _gst_model_cards(g: dict) -> list[dict]:
+    """One card per trained GST head (4 models)."""
+    created = datetime.now().strftime("%Y-%m-%d %H:%M")
+    algo_label = next(
+        (a["label"] for a in ML_ALGORITHMS if a["value"] == g.get("algorithm")),
+        "Gradient Boosting",
+    )
+    cards = []
+    for h in g.get("models", []):
+        cards.append({
+            "id": h["id"],
+            "name": h["name"],
+            "desc": h["desc"],
+            "accuracy": h["accuracyLabel"],
+            "algorithm": algo_label,
+            "createdDate": created,
+            "cvFolds": 3,
+            "sampleCount": g["nSamples"],
+            "features": h["nFeatures"],
+            "realData": True,
+            "kind": "gst",
+            "metrics": h["metrics"],
+            "metricLine": h["metricLine"],
+            "target": h["target"],
+            "modelKind": h["kind"],
+            "version": g["version"],
+            "classes": h.get("classes"),
+        })
+    return cards
 
 
 @router.post("/train")
@@ -52,19 +84,30 @@ async def train_models_handler(body: TrainBody):
     if not any(a["value"] == body.algorithm for a in ML_ALGORITHMS):
         raise HTTPException(400, f"Unknown algorithm '{body.algorithm}'.")
 
-    # Run real sklearn training in a thread pool — it's CPU-bound and would
-    # otherwise block FastAPI's async event loop for several seconds.
     loop = asyncio.get_event_loop()
+    trained_at = datetime.now(timezone.utc).isoformat()
+
+    # ── GST source → train ONLY the GST model, return ONLY its card ────────
+    if body.sourceId == "gst_data":
+        from app.gst import model as gst_model
+        try:
+            g = await loop.run_in_executor(None, partial(gst_model.train, body.algorithm))
+        except (ValueError, FileNotFoundError, ImportError) as exc:
+            raise HTTPException(400, str(exc))
+        cards = _gst_model_cards(g)
+        models_state.trained_models = cards
+        return {
+            "models": cards, "algorithm": body.algorithm, "trainedAt": trained_at,
+            "realFeatures": None, "gstFeatureSummary": g.get("featureSummary"),
+            "gstRegistry": gst_model.registry_view(),
+            "txCount": g["nSamples"],
+        }
+
+    # ── bank-statement sources → the 4 risk models ────────────────────────
     result = await loop.run_in_executor(
         None,
-        partial(
-            train_models_live,
-            body.algorithm,
-            dict(session_state.parsed_statements),
-        ),
+        partial(train_models_live, body.algorithm, dict(session_state.parsed_statements)),
     )
-
-    trained_at = datetime.now(timezone.utc).isoformat()
 
     # Persist trained sklearn objects for inference
     models_state.trained_sklearn_map = result["trainedMap"]

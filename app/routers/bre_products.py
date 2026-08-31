@@ -3,6 +3,7 @@ from pydantic import BaseModel
 
 from app.data.bre_product_rules import PRODUCT_NAMES, PRODUCT_RULE_IDS, product_catalogue
 from app.data.data_source_rules import rules_for
+from app.data.rule_descriptions import PRODUCT_DESCRIPTIONS, describe_rule
 from app.services.bre_product_engine import evaluate_product_rules
 from app.services.inference_engine import (
     apply_rule_engine,
@@ -26,7 +27,11 @@ async def list_products():
             {
                 "id": pid,
                 "name": PRODUCT_NAMES.get(pid, pid),
-                "rules": product_catalogue(pid),
+                "description": PRODUCT_DESCRIPTIONS.get(pid, ""),
+                "rules": [
+                    {**m, "description": describe_rule(m["label"])}
+                    for m in product_catalogue(pid)
+                ],
                 "enabled": bre_product_state.for_product(pid),
             }
             for pid in PRODUCT_RULE_IDS
@@ -107,7 +112,10 @@ async def get_product_source_rules(product_id: str, source_id: str):
     return {
         "productId": product_id,
         "sourceId": source_id,
-        "rules": rules_for(source_id),
+        "rules": [
+            {**r, "description": describe_rule(r["label"])}
+            for r in rules_for(source_id)
+        ],
         "enabled": product_source_rule_state.for_ps(product_id, source_id),
     }
 

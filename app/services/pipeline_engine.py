@@ -336,6 +336,27 @@ def _simulated_processed_row(rng, source_id: str) -> dict:
     }
 
 
+def _gst_processed_row(source_id: str, gst: dict) -> dict:
+    """GST source → a row describing the GST-model scoring, not bank features."""
+    seen = gst.get("returnsSeen") or {}
+    seen_str = " + ".join(k for k, v in seen.items() if v) or (
+        "GST summary" if gst.get("mode") == "summary" else "GST returns")
+    risk = gst.get("riskCounts") or {}
+    risk_str = " / ".join(f"{k} {v}" for k, v in risk.items()) or "—"
+    avg = gst.get("avgUnderwritingScore")
+    biz = gst.get("businesses") or gst.get("records") or 0
+    return {
+        "id": source_id,
+        "kind": "gst",
+        "adb": f"{biz} business{'' if biz == 1 else 'es'}",
+        "gstDelta": f"score {avg}" if avg is not None else "—",
+        "upiVelocity": seen_str,
+        "cersai": risk_str,
+        "normScore": f"{avg / 100:.3f}" if avg is not None else "—",
+        "status": "GST scored",
+    }
+
+
 # ── UI table builders (one row per source×feature, for the frontend) ──────────
 
 def _build_normalize_table(normalized_per_source: dict) -> list[dict]:
@@ -431,6 +452,10 @@ def run_pipeline(
     rng = create_rng(f"pipeline:{','.join(selected_ids)}:{time.time()}")
     processed_table = []
     for source_id in selected_ids:
+        gst_block = (parsed_statements.get(source_id) or {}).get("gst")
+        if gst_block:
+            processed_table.append(_gst_processed_row(source_id, gst_block))
+            continue
         engineered = s4["perSource"].get(source_id)
         cleaned_txns = s2["cleaned"].get(source_id) or []
         if engineered and cleaned_txns:
@@ -439,6 +464,7 @@ def run_pipeline(
             processed_table.append(_simulated_processed_row(rng, source_id))
 
     stored_file = _write_feature_vector_csv(selected_ids, s4["perSource"], s5["selectedFeatures"])
+    selection_table = _build_selection_table(s5)
 
     stages = [
         {"id": 1, "name": "1. Data Gathering", "desc": "Fetch & aggregate feeds from selected sources",
@@ -462,6 +488,6 @@ def run_pipeline(
         "selectedFeatures": s5["selectedFeatures"],
         "normalizeTable": _build_normalize_table(s3["perSource"]),
         "engineeredTable": _build_engineered_table(s4["perSource"]),
-        "selectionTable": _build_selection_table(s5),
+        "selectionTable": selection_table,
         "completedAt": datetime.now(timezone.utc).isoformat(),
     }

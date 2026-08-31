@@ -309,8 +309,63 @@ def record_test_history(bundle: dict, source_id: str | None, file_name: str | No
         session.close()
 
 
+def record_gst_test_history(result: dict, source_id: str | None, file_name: str | None,
+                            custom_id: str | None = None) -> None:
+    """One history row per GST upload — all 4 GST heads folded into it. `result`
+    is the /api/gst/score-testing payload; it is stored so the row can reopen."""
+    if not db.DB_ENABLED:
+        return
+    session = get_session()
+    if session is None:
+        return
+    try:
+        d0 = (result.get("detail") or [{}])[0]
+        gstin = d0.get("gstin") or (d0.get("profile") or {}).get("gstin")
+        risk_counts = result.get("riskCounts") or {}
+        grade = max(risk_counts, key=risk_counts.get) if risk_counts else None
+        label = (custom_id or "").strip() or gstin or (file_name.rsplit(".", 1)[0] if file_name else None)
+        key = f"ref:{custom_id.strip().lower()}" if (custom_id or "").strip() not in ("", "applicant") \
+            else (f"gstin:{gstin.lower()}" if gstin else f"file:{(file_name or 'gst').rsplit('.', 1)[0].lower()}")
+        heads = result.get("headSummary") or {}
+        fields = dict(
+            applicant_name=label,
+            bank_name=None,
+            model_id="gst_models",
+            model_name="GST Models (4)",
+            model_version=f"v{result.get('modelVersion')}" if result.get("modelVersion") else None,
+            data_source="GST_RETURNS" if result.get("mode") == "returns" else "GST_SUMMARY",
+            credit_score=result.get("avgUnderwritingScore"),
+            risk_grade=grade,
+            decision=None,
+            transaction_count=result.get("businesses") or result.get("scored") or 0,
+            source_id=source_id,
+            custom_id=custom_id,
+            file_name=file_name,
+            result_bundle={"_kind": "gst", **result},
+            tested_at=_now(),
+        )
+        existing = session.scalar(select(TestHistory).where(
+            TestHistory.applicant_key == key, TestHistory.model_id == "gst_models",
+        ))
+        if existing is not None:
+            for k, v in fields.items():
+                setattr(existing, k, v)
+        else:
+            session.add(TestHistory(applicant_key=key, first_tested_at=_now(), **fields))
+        session.commit()
+        # keep the head list on the stored bundle for the row's model chips
+        _ = heads
+    except Exception:  # noqa: BLE001
+        session.rollback()
+        logger.exception("record_gst_test_history failed")
+    finally:
+        session.close()
+
+
 def list_test_history(limit: int = 1000) -> list[dict]:
-    """One row per tested application, newest first. Empty when the DB is off."""
+    """ONE row per tested application (not per model), newest first. Every model
+    run against the same upload is merged into the row's `models` list. Empty
+    when the DB is off."""
     if not db.DB_ENABLED:
         return []
     session = get_session()
@@ -323,27 +378,45 @@ def list_test_history(limit: int = 1000) -> list[dict]:
             .order_by(TestHistory.tested_at.desc())
             .limit(limit)
         ).all()
-        out = []
-        for r in rows:
-            label = r.ref_id or r.applicant_name
-            if not label and r.file_name:
-                label = r.file_name.rsplit(".", 1)[0]
-            out.append({
-                "rowId": r.id,
-                "id": label or "—",
-                "bank": r.bank_name or "—",
-                "modelId": r.model_id,
-                "model": r.model_name or r.model_id or "—",
-                "version": r.model_version,
-                "dataSource": r.data_source,
-                "riskScore": r.credit_score,
-                "grade": r.risk_grade,
-                "decision": r.decision,
-                "txCount": r.transaction_count,
-                "date": r.tested_at.isoformat() if r.tested_at else None,
-                "status": "ANALYZED",
-            })
-        return out
+        grouped: dict[str, dict] = {}
+        for r in rows:  # newest-first, so the first row seen per key is the latest
+            m = {"modelId": r.model_id, "model": r.model_name or r.model_id or "—",
+                 "version": r.model_version, "score": r.credit_score,
+                 "grade": r.risk_grade, "decision": r.decision}
+            # a GST row already covers all 4 heads — expand them for the chips
+            gst_models = None
+            if r.model_id == "gst_models" and isinstance(r.result_bundle, dict):
+                hs = r.result_bundle.get("headSummary") or {}
+                gst_models = [
+                    {"modelId": hid, "model": h.get("name", hid),
+                     "version": r.model_version,
+                     "score": h.get("value"), "grade": h.get("label"), "decision": None}
+                    for hid, h in hs.items()
+                ] or None
+            g = grouped.get(r.applicant_key)
+            if g is None:
+                label = r.ref_id or r.applicant_name
+                if not label and r.file_name:
+                    label = r.file_name.rsplit(".", 1)[0]
+                grouped[r.applicant_key] = {
+                    "rowId": r.id,            # newest row → reopen this one
+                    "id": label or "—",
+                    "bank": r.bank_name or "—",
+                    "modelId": r.model_id,
+                    "model": m["model"],
+                    "version": r.model_version,
+                    "dataSource": r.data_source,
+                    "riskScore": r.credit_score,
+                    "grade": r.risk_grade,
+                    "decision": r.decision,
+                    "txCount": r.transaction_count,
+                    "date": r.tested_at.isoformat() if r.tested_at else None,
+                    "status": "ANALYZED",
+                    "models": gst_models or [m],
+                }
+            elif not any(x["modelId"] == r.model_id for x in g["models"]):
+                g["models"].append(m)
+        return list(grouped.values())
     except Exception:  # noqa: BLE001
         logger.exception("list_test_history failed")
         return []

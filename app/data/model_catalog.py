@@ -18,6 +18,7 @@ VERSION_OPTIONS = [
 
 ML_ALGORITHMS = [
     {"value": "gradient_boosting", "label": "Gradient Boosting", "accuracyDelta": 0},
+    {"value": "xgboost", "label": "XGBoost", "accuracyDelta": 0.4},
     {"value": "random_forest", "label": "Random Forest", "accuracyDelta": -0.6},
     {"value": "logistic_regression", "label": "Logistic Regression", "accuracyDelta": -3.2},
     {"value": "svm", "label": "SVM (Support Vector Machine)", "accuracyDelta": -1.8},

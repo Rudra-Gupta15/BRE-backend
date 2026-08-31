@@ -19,3 +19,4 @@ app/data/generated/
 models/
 app/data/training/
 models/gst/
+demo_gst/

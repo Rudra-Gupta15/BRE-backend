@@ -16,6 +16,7 @@ CATEGORICAL = [
 DROP = {
     "customer_id", "gstin", "legal_name", "trade_name",
     "gst_registration_date", "gst_return_period", "return_filing_date",
+    "gstr1_vs_gstr3b_mismatch_pct",  # carried for BRE rules, not a model feature
     SCORE_TARGET, FLAG_TARGET,
 }
 

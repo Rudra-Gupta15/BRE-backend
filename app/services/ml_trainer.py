@@ -57,6 +57,18 @@ def _get_estimators(algorithm: str) -> dict:
             "fraud":   IsolationForest(n_estimators=150, contamination=0.08, random_state=42),
             "balance": GradientBoostingRegressor(n_estimators=150, max_depth=4, random_state=42),
         }
+    if alg == "xgboost":
+        from xgboost import XGBClassifier, XGBRegressor
+        return {
+            "risk":    XGBClassifier(n_estimators=250, max_depth=4, learning_rate=0.08,
+                                     subsample=0.9, colsample_bytree=0.9, eval_metric="logloss",
+                                     random_state=42),
+            "cash":    XGBRegressor(n_estimators=250, max_depth=4, learning_rate=0.08,
+                                    subsample=0.9, colsample_bytree=0.9, random_state=42),
+            "fraud":   IsolationForest(n_estimators=200, contamination=0.08, random_state=42),
+            "balance": XGBRegressor(n_estimators=250, max_depth=4, learning_rate=0.08,
+                                    subsample=0.9, colsample_bytree=0.9, random_state=42),
+        }
     if alg == "random_forest":
         return {
             "risk":    RandomForestClassifier(n_estimators=200, max_depth=6, random_state=42),
@@ -631,6 +643,14 @@ from sklearn.ensemble import HistGradientBoostingClassifier, HistGradientBoostin
 def _dataset_estimators(algorithm: str):
     """Fast estimators tuned for a 10k+ row tabular dataset."""
     alg = algorithm.lower()
+    if alg == "xgboost":
+        from xgboost import XGBClassifier, XGBRegressor
+        return (
+            XGBClassifier(n_estimators=300, max_depth=5, learning_rate=0.08, subsample=0.9,
+                          colsample_bytree=0.9, eval_metric="logloss", n_jobs=-1, random_state=42),
+            XGBRegressor(n_estimators=300, max_depth=5, learning_rate=0.08, subsample=0.9,
+                         colsample_bytree=0.9, n_jobs=-1, random_state=42),
+        )
     if alg == "random_forest":
         return (
             RandomForestClassifier(n_estimators=120, max_depth=12, n_jobs=-1, random_state=42),
