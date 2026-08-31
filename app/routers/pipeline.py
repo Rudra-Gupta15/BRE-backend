@@ -21,6 +21,59 @@ async def get_uploads():
 _MAX_FOLDER_FILES = 40
 
 
+def _ingest_gst(source_id: str, buf: bytes, file_name: str, analysis: dict) -> dict:
+    """One GST file → parsed by the GST parser, scored by the GST model, and
+    appended to the GST training corpus."""
+    from app.gst import service as gst_service
+
+    try:
+        res = gst_service.ingest_gst_file(buf, file_name)
+    except ValueError as exc:
+        raise HTTPException(422, f"GST file rejected ({file_name}): {exc}") from exc
+
+    preds = res["predictions"]
+    analysis["cleanlinessPercent"] = res["completeness"]
+
+    gst_summary = {
+        "records": res["records"],
+        "avgUnderwritingScore": preds.get("avgUnderwritingScore"),
+        "riskCounts": preds.get("riskCounts", {}),
+        "modelVersion": preds.get("modelVersion"),
+        "completeness": res["completeness"],
+        "corpusRows": res["corpusRows"],
+        "modelAvailable": bool(preds.get("available")),
+    }
+    parsed = {
+        "transactions": [],
+        "summary": {
+            "transactionCount": 0,
+            "gstRecords": res["records"],
+            "kind": "gst",
+        },
+        # Store the summary + a small sample only — a 6000-row folder must not
+        # bloat the session cache / DB row.
+        "gst": {**gst_summary, "sample": preds.get("predictions", [])[:20]},
+    }
+
+    lin = {
+        "file_sha256": lineage.file_digest(buf),
+        "parse_confidence": (res["completeness"] / 100.0),
+        "parse_warnings": res["warnings"] or None,
+        **lineage.parser_identity(),
+    }
+    statement_id = save_statement(source_id, analysis, parsed, lineage=lin)
+
+    meta = {
+        **analysis,
+        "autoFilled": False,
+        "statementSummary": parsed["summary"],
+        "transactionsParsed": 0,
+        "gst": gst_summary,
+        "statementId": statement_id,
+    }
+    return {"meta": meta, "statement": parsed, "lineage": lin, "warnings": res["warnings"]}
+
+
 async def _ingest_one(source_id: str, file: UploadFile) -> dict:
     """Scan + parse a single uploaded file. Returns
     {meta, statement, statementId, lineage, warnings} or raises HTTPException."""
@@ -36,6 +89,12 @@ async def _ingest_one(source_id: str, file: UploadFile) -> dict:
         raise HTTPException(422, f"Upload rejected ({file_name}): {exc}") from exc
 
     analysis = analyze_file(buf, file_name)
+
+    # GST Transaction Data → the GST subsystem (parser + model), not the bank
+    # statement pipeline. These files carry GST return fields, not transactions.
+    if source_id == "gst_data":
+        return _ingest_gst(source_id, buf, file_name, analysis)
+
     try:
         parsed = await parse_statement(buf, file_name)
     except guardrails.GuardrailError as exc:

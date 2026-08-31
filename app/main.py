@@ -5,11 +5,13 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import CORS_ORIGIN
 from app.db import init_db
+from app.gst import api_router as gst_api_router
 from app.routers import (
     ai_architecture,
     auth,
     bre_products,
     dashboard,
+    data_source_rules,
     data_sources,
     inference,
     models,
@@ -63,6 +65,8 @@ app.include_router(pipeline.router, prefix="/api")
 app.include_router(models.router, prefix="/api")
 app.include_router(inference.router, prefix="/api")
 app.include_router(bre_products.router, prefix="/api")
+app.include_router(data_source_rules.router, prefix="/api")
+app.include_router(gst_api_router, prefix="/api")
 app.include_router(ai_architecture.router, prefix="/api")
 app.include_router(settings.router, prefix="/api")
 app.include_router(dashboard.router, prefix="/api")

@@ -4,6 +4,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from app.data.data_sources import PRESET_CONFIGS
+from app.state.published_state import published_state
 from app.state.session_state import session_state
 
 router = APIRouter(prefix="/data-sources", tags=["data-sources"])
@@ -21,7 +22,12 @@ async def list_presets():
 
 @router.get("/selection")
 async def get_selection():
-    return {"selectedIds": session_state.selected_ids}
+    # "Published" sources survive /reset and restarts — rehydrate the live
+    # session selection from them so the pipeline sees the same set.
+    valid_ids = {s["id"] for s in session_state.all_data_sources()}
+    ids = [i for i in published_state.published_ids if i in valid_ids]
+    session_state.selected_ids = ids
+    return {"selectedIds": ids}
 
 
 class SelectionBody(BaseModel):
@@ -31,9 +37,34 @@ class SelectionBody(BaseModel):
 @router.put("/selection")
 async def set_selection(body: SelectionBody):
     valid_ids = {s["id"] for s in session_state.all_data_sources()}
-    session_state.selected_ids = [i for i in body.selectedIds if i in valid_ids]
+    ids = [i for i in body.selectedIds if i in valid_ids]
+    session_state.selected_ids = ids
     session_state.persist()
-    return {"selectedIds": session_state.selected_ids}
+    published_state.set_published_ids(ids)
+    return {"selectedIds": ids}
+
+
+@router.get("/status")
+async def get_statuses():
+    valid_ids = {s["id"] for s in session_state.all_data_sources()}
+    return {
+        "statuses": {sid: published_state.status_of(sid) for sid in valid_ids},
+    }
+
+
+class StatusBody(BaseModel):
+    statuses: dict[str, str]
+
+
+@router.put("/status")
+async def set_statuses(body: StatusBody):
+    valid_ids = {s["id"] for s in session_state.all_data_sources()}
+    clean = {k: v for k, v in body.statuses.items() if k in valid_ids}
+    published_state.set_many(clean)
+    session_state.selected_ids = [
+        i for i in published_state.published_ids if i in valid_ids
+    ]
+    return {"statuses": {sid: published_state.status_of(sid) for sid in valid_ids}}
 
 
 class AddSourceBody(BaseModel):
