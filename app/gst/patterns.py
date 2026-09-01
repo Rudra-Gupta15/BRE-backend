@@ -48,8 +48,11 @@ def _f(v, d: float = 0.0) -> float:
 
 
 def _uploaded_profiles() -> list[dict]:
+    # Test-time only — read the Model Testing upload (scope="testing"), the same
+    # store every other GST tab on that page uses. (Was "hub", which is the
+    # Model Hub store and is empty when the user only uploaded on Model Testing.)
     out: list[dict] = []
-    for s in session_state.statements_for("gst_data", "hub"):
+    for s in session_state.statements_for("gst_data", "testing"):
         for d in ((s or {}).get("gst") or {}).get("detail") or []:
             p = d.get("profile")
             if isinstance(p, dict):

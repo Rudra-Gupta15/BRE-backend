@@ -257,6 +257,31 @@ async def pattern_match(body: PatternMatchBody):
     return patterns.test_patterns(body.sourceId or None, body.customId.strip() or "applicant")
 
 
+class ExplainRuleBody(BaseModel):
+    label: str
+    status: str = ""
+    detail: str = ""
+    serious: bool = False
+    product: str = ""
+    decision: str = ""
+
+
+@router.post("/explain-rule")
+async def explain_rule(body: ExplainRuleBody):
+    """One plain-English paragraph explaining a single BRE rule result — why it
+    passed, failed, or could not be evaluated. Used by the expandable rows on the
+    Signals Decision tab (AA + GST). Best-effort AI; deterministic fallback."""
+    import asyncio
+
+    from app.common import ai_explain
+
+    text = await asyncio.to_thread(
+        ai_explain.explain_rule,
+        body.label, body.status, body.detail, body.serious, body.product, body.decision,
+    )
+    return {"explanation": text}
+
+
 @router.get("/history")
 async def get_history():
     """Test history — one row per tested application, newest first. Reads the

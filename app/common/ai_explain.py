@@ -1,55 +1,69 @@
-"""Plain-English one-liners for the Pattern Match tab, via the local Ollama LLM.
+"""Plain-English explanations for the Signals Decision tab, via the local Ollama LLM.
 
-`explain(kind, result)` returns {"fraud": str|None, "anomaly": str|None} — one
-short sentence for each of the two boxes shown to a non-technical credit
-officer. Best-effort: if Ollama is unreachable both are None and the UI falls
-back to a canned sentence.
+`explain_rule(...)` returns one short plain-English paragraph for a single BRE
+rule result — why it passed, why it failed, or why it could not be evaluated —
+written for a non-technical credit officer. Best-effort: if Ollama is unreachable
+a deterministic fallback sentence (built from the curated rule text) is returned
+instead, so the UI always has something to show.
 """
 
 from __future__ import annotations
 
 import json
 import logging
-import re
 import urllib.error
 import urllib.request
 
 from app.common import config
+from app.common.rule_text import describe_rule
 
 logger = logging.getLogger(__name__)
 
 _TIMEOUT = 30
 
 
-def _facts(result: dict) -> str:
-    lines: list[str] = []
-    for _mid, s in (result.get("modelScores") or {}).items():
-        pct = int(round((s.get("probability") or 0) * 100))
-        lines.append(f"- {s.get('name')}: {pct}% ({'FLAGGED' if s.get('flag') else 'not flagged'})")
-    hits = [f"{t['name']} ({t['verdict']})" for t in result.get("typologies", [])
-            if t.get("verdict") in ("match", "elevated")]
-    lines.append("- Fraud signatures triggered: " + (", ".join(hits) if hits else "none"))
-    dev = [f"{r['label']} {r['value']} vs baseline {r['baseline']} ({r['band']})"
-           for r in (result.get("comparison") or {}).get("perMetric", [])
-           if r.get("band") and r["band"] != "within"][:4]
-    lines.append("- Numbers outside the normal range: " + (", ".join(dev) if dev else "none"))
-    lines.append(f"- Overall verdict: {result.get('verdict', 'n/a')}")
-    return "\n".join(lines)
+def _fallback(label: str, status: str, detail: str, serious: bool) -> str:
+    """No-LLM explanation — still readable, built from the curated rule text."""
+    what = describe_rule(label)
+    if status == "SKIP":
+        return (f"{what} It could not be checked automatically here — it needs the "
+                f"full rule engine or data that wasn't part of this upload"
+                f"{f' ({detail})' if detail else ''}. A reviewer would confirm it by hand.")
+    if status == "FAIL":
+        tail = " This is a key rule, so it weighs heavily on the decision." if serious else ""
+        return f"{what} The applicant did not meet it{f' — {detail}' if detail else ''}.{tail}"
+    return f"{what} The applicant met this requirement{f' — {detail}' if detail else ''}."
 
 
-def explain(kind: str, result: dict) -> dict:
-    empty = {"fraud": None, "anomaly": None}
-    if not result or not result.get("available"):
-        return empty
+def explain_rule(label: str, status: str, detail: str = "",
+                 serious: bool = False, product: str = "", decision: str = "") -> str:
+    """One plain-English paragraph explaining this rule's result. Falls back to a
+    deterministic sentence when Ollama is unreachable."""
+    label = (label or "").strip()
+    status = (status or "").strip().upper()
+    detail = (detail or "").strip()
+    fallback = _fallback(label, status, detail, serious)
 
-    subject = "GST business" if kind == "gst" else "loan applicant's bank statements"
+    verb = {"PASS": "passed", "FAIL": "failed", "SKIP": "could not be evaluated"}.get(status, "was checked")
+    ask = {
+        "PASS": "Explain in 2-3 plain sentences what this rule checks and why the applicant passed it, "
+                "and what that means for the loan.",
+        "FAIL": "Explain in 2-3 plain sentences what this rule checks, why the applicant failed it, "
+                "and how much that should worry the lender.",
+        "SKIP": "Explain in 2-3 plain sentences what this rule would have checked and why it could not "
+                "be run automatically here (it needs the full rule engine or data that wasn't supplied).",
+    }.get(status, "Explain in 2-3 plain sentences what this rule checks and what the result means.")
+
     prompt = (
-        f"A non-technical bank credit officer is reviewing an automated check on a "
-        f"{subject}. Write TWO short plain-English sentences — no jargon, no numbers.\n\n"
-        f"Reply in EXACTLY this format:\n"
-        f"FRAUD: <one sentence: is there any sign of deliberate fraud, and the gist why>\n"
-        f"UNUSUAL: <one sentence: is the account activity normal or odd, and the gist why>\n\n"
-        f"Check results:\n{_facts(result)}"
+        f"A non-technical loan credit officer is reading an automated underwriting check. "
+        f"No jargon, no restating the numbers verbatim, no bullet points — just clear prose.\n\n"
+        f"Rule: {label}\n"
+        f"What it checks: {describe_rule(label)}\n"
+        f"Result: {verb}\n"
+        f"System note: {detail or '(none)'}\n"
+        f"{'Loan product: ' + product if product else ''}\n"
+        f"{'Overall decision so far: ' + decision if decision else ''}\n\n"
+        f"{ask}"
     )
     payload = json.dumps({
         "model": config.active_vision_model(),
@@ -65,12 +79,8 @@ def explain(kind: str, result: dict) -> dict:
         with urllib.request.urlopen(req, timeout=_TIMEOUT) as resp:
             text = (json.loads(resp.read().decode("utf-8")).get("message") or {}).get("content", "")
     except (urllib.error.URLError, TimeoutError, ValueError, KeyError) as exc:
-        logger.warning("AI explain unavailable (%s)", exc)
-        return empty
+        logger.warning("Rule AI explain unavailable (%s) — using fallback", exc)
+        return fallback
 
-    fraud = re.search(r"FRAUD:\s*(.+)", text)
-    unusual = re.search(r"UNUSUAL:\s*(.+)", text)
-    return {
-        "fraud": fraud.group(1).strip() if fraud else None,
-        "anomaly": unusual.group(1).strip() if unusual else None,
-    }
+    text = (text or "").strip()
+    return text or fallback
