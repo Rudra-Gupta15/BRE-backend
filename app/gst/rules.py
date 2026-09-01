@@ -7,9 +7,9 @@ model saw plus the 4 head predictions. Same result shape as
 """
 from __future__ import annotations
 
-from app.data.data_source_rules import DATA_SOURCE_RULES
-from app.state.bre_product_state import bre_product_state
-from app.state.product_source_rule_state import product_source_rule_state
+from app.common.source_rules import DATA_SOURCE_RULES
+from app.aa.product_state import bre_product_state
+from app.aa.product_source_state import product_source_rule_state
 
 
 def _f(v, d: float = 0.0) -> float:

@@ -4,7 +4,7 @@ from fastapi import APIRouter, File, HTTPException, UploadFile
 from pydantic import BaseModel
 
 from app.gst import aggregate, model, returns, rules, service
-from app.state.session_state import session_state
+from app.common.state.session import session_state
 
 logger = logging.getLogger(__name__)
 
@@ -21,6 +21,26 @@ async def get_model_status():
 async def get_model_registry():
     """Version list + per-head deploy state for the Model Hub deployment table."""
     return model.registry_view()
+
+
+@router.get("/patterns")
+async def get_patterns():
+    """Post-training pattern recognition for the GST model — behavioral patterns
+    across the uploaded business(es) + per-head feature weights. Twin of
+    /api/models/patterns; same "Detected Patterns" card."""
+    from app.gst import patterns
+
+    return patterns.compute()
+
+
+@router.get("/pattern-match")
+async def pattern_match():
+    """Anomaly / fraud pattern match for the GST file uploaded on the Model
+    Testing page — trained pattern models + rule checks + deviation table + an
+    overall verdict. Twin of POST /api/inference/patterns."""
+    from app.gst import patterns
+
+    return patterns.test_patterns()
 
 
 class ActiveVersionBody(BaseModel):
@@ -123,7 +143,7 @@ async def record_test(body: RecordTestBody):
     result = await score_testing()
     if not result.get("available"):
         return {"recorded": False, "message": result.get("message")}
-    from app.services.persistence import record_gst_test_history
+    from app.common.persistence import record_gst_test_history
     record_gst_test_history(result, "gst_data", body.fileName, body.customId)
     return {"recorded": True}
 
@@ -162,6 +182,12 @@ async def train_model(file: UploadFile | None = File(default=None)):
     except (ValueError, FileNotFoundError) as exc:
         raise HTTPException(400, str(exc))
     result["appendedRows"] = appended
+    try:
+        from app.gst import patterns
+        patterns.save_training_baseline()
+        patterns.train_pattern_models()
+    except Exception:  # noqa: BLE001
+        logger.warning("GST pattern-model training failed", exc_info=True)
     return result
 
 

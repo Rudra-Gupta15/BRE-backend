@@ -1,25 +1,35 @@
+"""FastAPI application entry point.
+
+Builds the app, wires CORS, and mounts every router under /api:
+
+    app.aa.router        -> /pipeline, /models, /inference, /bre-products, /settings
+    app.gst.api_router   -> /gst/*
+    app.common.routes.*  -> /auth, /reset, /health, /dashboard, /security,
+                            /data-sources, /data-source-rules, /ai-architecture
+
+On startup it connects to PostgreSQL if DATABASE_URL is set (otherwise runs
+in-memory) and seeds the deployment table + population-model registry.
+"""
+
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.config import CORS_ORIGIN
-from app.db import init_db
-from app.gst import api_router as gst_api_router
-from app.routers import (
-    ai_architecture,
+from app.aa.router import router as aa_router
+from app.common.config import CORS_ORIGIN
+from app.common.db import init_db
+from app.common.routes import (
+    ai,
     auth,
-    bre_products,
     dashboard,
-    data_source_rules,
-    data_sources,
-    inference,
-    models,
-    pipeline,
     security,
-    settings,
+    source_rules,
+    sources,
     system,
 )
+from app.gst import api_router as gst_api_router
+
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
@@ -32,10 +42,10 @@ def _seed_reference_rows() -> None:
     """Make sure the deployment table + population-model registry are mirrored
     into the DB from the moment the server starts (before any training run)."""
     try:
-        from app.routers.models import _persist_deployment_state
-        from app.services import model_registry
-        from app.services.persistence import all_feature_vectors, sync_model_versions
-        from app.services.security import outliers
+        from app.aa import registry as model_registry
+        from app.aa.routes.models import _persist_deployment_state
+        from app.common.persistence import all_feature_vectors, sync_model_versions
+        from app.common.security import outliers
 
         model_registry.backfill_hashes()
         _persist_deployment_state()
@@ -60,15 +70,11 @@ app.add_middleware(
 )
 
 app.include_router(auth.router, prefix="/api")
-app.include_router(data_sources.router, prefix="/api")
-app.include_router(pipeline.router, prefix="/api")
-app.include_router(models.router, prefix="/api")
-app.include_router(inference.router, prefix="/api")
-app.include_router(bre_products.router, prefix="/api")
-app.include_router(data_source_rules.router, prefix="/api")
+app.include_router(sources.router, prefix="/api")
+app.include_router(aa_router, prefix="/api")
 app.include_router(gst_api_router, prefix="/api")
-app.include_router(ai_architecture.router, prefix="/api")
-app.include_router(settings.router, prefix="/api")
+app.include_router(source_rules.router, prefix="/api")
+app.include_router(ai.router, prefix="/api")
 app.include_router(dashboard.router, prefix="/api")
 app.include_router(security.router, prefix="/api")
 app.include_router(system.router, prefix="/api")

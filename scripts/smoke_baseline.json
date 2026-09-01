@@ -642,6 +642,59 @@
       },
       "status": 200
     },
+    "GET /api/gst/pattern-match": {
+      "shape": {
+        "available": "bool",
+        "message": "str"
+      },
+      "status": 200
+    },
+    "GET /api/gst/patterns": {
+      "shape": {
+        "available": "bool",
+        "baseline": "str",
+        "fraud": {
+          "files": "int",
+          "metrics": [
+            "list[8]",
+            {
+              "flagged": "int",
+              "label": "str",
+              "max": "float",
+              "median": "float",
+              "metric": "str"
+            }
+          ],
+          "typologies": [
+            "list[6]",
+            {
+              "clear": "int",
+              "desc": "str",
+              "elevated": "int",
+              "hard": "bool",
+              "matched": "int",
+              "name": "str",
+              "worstEvidence": "str"
+            }
+          ]
+        },
+        "modelSignals": [
+          "list[4]",
+          {
+            "available": "bool",
+            "features": [
+              "list[0]"
+            ],
+            "modelId": "str",
+            "name": "str",
+            "note": "str"
+          }
+        ],
+        "source": "str",
+        "trainedAt": "str"
+      },
+      "status": 200
+    },
     "GET /api/gst/score-testing": {
       "shape": {
         "available": "bool",
@@ -890,6 +943,13 @@
         },
         "modelId": "str",
         "trainedAt": "str"
+      },
+      "status": 200
+    },
+    "GET /api/models/patterns": {
+      "shape": {
+        "available": "bool",
+        "message": "str"
       },
       "status": 200
     },
@@ -1218,6 +1278,13 @@
       "status": 200
     },
     "POST /api/inference/bre-rules": {
+      "shape": {
+        "available": "bool",
+        "message": "str"
+      },
+      "status": 200
+    },
+    "POST /api/inference/patterns": {
       "shape": {
         "available": "bool",
         "message": "str"
@@ -5251,6 +5318,169 @@
       },
       "status": 200
     },
+    "GET /api/gst/pattern-match": {
+      "body": {
+        "available": false,
+        "message": "Upload a GST file on this page \u2014 pattern match runs on the scored business(es)."
+      },
+      "status": 200
+    },
+    "GET /api/gst/patterns": {
+      "body": {
+        "available": true,
+        "baseline": "trained baseline (n=6023)",
+        "fraud": {
+          "files": 6023,
+          "metrics": [
+            {
+              "flagged": 1535,
+              "label": "Missed GST returns",
+              "max": 18.0,
+              "median": 1.0,
+              "metric": "missed_return_count"
+            },
+            {
+              "flagged": 1092,
+              "label": "Consecutive declining quarters",
+              "max": 4.0,
+              "median": 1.0,
+              "metric": "consecutive_declining_quarters"
+            },
+            {
+              "flagged": 1,
+              "label": "Late GST returns",
+              "max": 11.0,
+              "median": 1.0,
+              "metric": "late_return_count"
+            },
+            {
+              "flagged": 0,
+              "label": "GSTR-1 vs 3B sales mismatch %",
+              "max": 0.0,
+              "median": 0.0,
+              "metric": "gstr1_vs_gstr3b_mismatch_pct"
+            },
+            {
+              "flagged": 0,
+              "label": "ITC claimed \u00f7 available",
+              "max": 0.997,
+              "median": 0.84,
+              "metric": "itc_claim_ratio"
+            },
+            {
+              "flagged": 0,
+              "label": "Turnover decline %",
+              "max": 24.954,
+              "median": 0.0,
+              "metric": "turnover_decline_percentage"
+            },
+            {
+              "flagged": 0,
+              "label": "Turnover growth YoY %",
+              "max": 44.962,
+              "median": 9.597,
+              "metric": "turnover_growth_yoy"
+            },
+            {
+              "flagged": 0,
+              "label": "Top-buyer sales concentration %",
+              "max": 61.987,
+              "median": 34.106,
+              "metric": "top_buyer_sales_percentage"
+            }
+          ],
+          "typologies": [
+            {
+              "clear": 1523,
+              "desc": "Returns missed entirely",
+              "elevated": 1499,
+              "hard": true,
+              "matched": 3001,
+              "name": "Filing evasion",
+              "worstEvidence": "2 missed return(s)"
+            },
+            {
+              "clear": 4728,
+              "desc": "Sustained sharp turnover decline",
+              "elevated": 203,
+              "hard": false,
+              "matched": 1092,
+              "name": "Turnover collapse",
+              "worstEvidence": "decline 2% / 4 declining qtr(s)"
+            },
+            {
+              "clear": 4715,
+              "desc": "Sales depend on one buyer",
+              "elevated": 1308,
+              "hard": false,
+              "matched": 0,
+              "name": "Buyer concentration risk",
+              "worstEvidence": "top buyer 60% of sales"
+            },
+            {
+              "clear": 6023,
+              "desc": "GSTR-1 vs GSTR-3B sales disagree",
+              "elevated": 0,
+              "hard": true,
+              "matched": 0,
+              "name": "Sales suppression",
+              "worstEvidence": ""
+            },
+            {
+              "clear": 6023,
+              "desc": "Input tax credit claimed exceeds available",
+              "elevated": 0,
+              "hard": true,
+              "matched": 0,
+              "name": "Fake ITC / over-claim",
+              "worstEvidence": ""
+            },
+            {
+              "clear": 6023,
+              "desc": "Implausible YoY turnover jump",
+              "elevated": 0,
+              "hard": false,
+              "matched": 0,
+              "name": "Turnover inflation",
+              "worstEvidence": ""
+            }
+          ]
+        },
+        "modelSignals": [
+          {
+            "available": false,
+            "features": [],
+            "modelId": "gst_underwriting_score_model",
+            "name": "GST Underwriting Score Model",
+            "note": "Model artifact unreadable \u2014 retrain the GST model."
+          },
+          {
+            "available": false,
+            "features": [],
+            "modelId": "gst_risk_flag_model",
+            "name": "GST Risk Flag Model",
+            "note": "Model artifact unreadable \u2014 retrain the GST model."
+          },
+          {
+            "available": false,
+            "features": [],
+            "modelId": "gst_loan_eligibility_model",
+            "name": "GST Loan Eligibility Model",
+            "note": "Model artifact unreadable \u2014 retrain the GST model."
+          },
+          {
+            "available": false,
+            "features": [],
+            "modelId": "gst_filing_compliance_model",
+            "name": "GST Filing Compliance Model",
+            "note": "Model artifact unreadable \u2014 retrain the GST model."
+          }
+        ],
+        "source": "gst",
+        "trainedAt": "<ts>"
+      },
+      "status": 200
+    },
     "GET /api/gst/score-testing": {
       "body": {
         "available": false,
@@ -5414,7 +5644,7 @@
             "Yes Bank"
           ],
           "columns": 54,
-          "file": "C:\\Study\\Projects\\BRE\\Backend\\app\\data\\training\\accumulated.csv",
+          "file": "<path>",
           "total": 20250
         },
         "registry": [
@@ -5725,6 +5955,13 @@
         },
         "modelId": "gst_risk_flag_model",
         "trainedAt": "<ts>"
+      },
+      "status": 200
+    },
+    "GET /api/models/patterns": {
+      "body": {
+        "available": false,
+        "message": "Train the bank models first."
       },
       "status": 200
     },
@@ -7115,6 +7352,13 @@
       "body": {
         "available": false,
         "message": "Upload a bank statement first \u2014 BRE rules run against real transaction data."
+      },
+      "status": 200
+    },
+    "POST /api/inference/patterns": {
+      "body": {
+        "available": false,
+        "message": "Upload a bank statement on this page \u2014 pattern match runs on real transactions."
       },
       "status": 200
     },

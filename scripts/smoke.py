@@ -45,6 +45,7 @@ GET_ENDPOINTS = [
     "/api/models/evaluation",
     "/api/models/evaluation?model_id=gst_risk_flag_model",
     "/api/models/evaluation/summary",
+    "/api/models/patterns",
     "/api/models/registry",
     "/api/inference/deployed-models",
     "/api/inference/history",
@@ -56,6 +57,8 @@ GET_ENDPOINTS = [
     "/api/data-source-rules/gst_data",
     "/api/gst/model",
     "/api/gst/model/registry",
+    "/api/gst/patterns",
+    "/api/gst/pattern-match",
     "/api/gst/score-testing",
     "/api/ai-architecture",
     "/api/settings/rules",
@@ -75,6 +78,7 @@ GET_ENDPOINTS = [
 POST_ENDPOINTS = [
     ("/api/reset", {}),
     ("/api/inference/bre-rules", {"customId": "smoke", "sourceId": "account_aggregator"}),
+    ("/api/inference/patterns", {"customId": "smoke", "sourceId": "account_aggregator"}),
     ("/api/gst/bre-evaluate", {}),
 ]
 
@@ -84,6 +88,10 @@ _TS_KEYS = {
     "createdDate", "generatedAt", "at", "ranAt", "startedAt",
 }
 _TS_RE = re.compile(r"\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}")
+# Absolute filesystem paths appear in a few responses (dataset/model file
+# locations). They move with the refactor but the behavior is identical, so
+# blank anything that looks like a path into or under the repo.
+_PATH_RE = re.compile(r"[A-Za-z]:[\\/].*Backend|/.*/Backend|Backend[\\/]app[\\/]")
 
 
 def _norm(obj):
@@ -94,6 +102,8 @@ def _norm(obj):
         return [_norm(x) for x in obj]
     if isinstance(obj, str) and _TS_RE.search(obj):
         return "<ts>"
+    if isinstance(obj, str) and _PATH_RE.search(obj):
+        return "<path>"
     if isinstance(obj, float):
         return round(obj, 4)
     return obj

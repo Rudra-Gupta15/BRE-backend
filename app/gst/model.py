@@ -37,7 +37,7 @@ from sklearn.model_selection import KFold, StratifiedKFold
 from sklearn.preprocessing import StandardScaler
 
 from app.gst.schema import CATEGORICAL, DROP, FLAG_TARGET, RISK_ORDER, SCORE_TARGET
-from app.services.security import serialization
+from app.common.security import serialization
 
 logger = logging.getLogger(__name__)
 
@@ -202,7 +202,7 @@ def _train_one_head(df: pd.DataFrame, spec: dict, algorithm: str = "gradient_boo
     """Fit + real N-fold CV one head. Returns the fitted estimator, its scaler,
     feature list, classes, the back-compat `metrics` block and — for the Model
     Evaluation panel — `evalMetrics` (shared metric slots) + per-fold `cvFolds`,
-    in the same shape ml_trainer.evaluate_trained produces for the bank models."""
+    in the same shape app.aa.model.evaluate_trained produces for the bank models."""
     if spec["target"] not in df.columns:
         raise ValueError(f"Dataset missing head target '{spec['target']}'.")
     X = _feature_frame(df, exclude={spec["target"], *spec["extraExclude"]})
@@ -609,6 +609,51 @@ def reevaluate() -> dict:
         hm["metricLine"] = f["metricLine"]
     _write_registry(reg)
     return head_evaluations()
+
+
+def corpus_summary() -> dict:
+    """Headline aggregates over the current GST training corpus (bundled +
+    uploaded). Feeds app.gst.patterns' behavioral view. {} if no dataset."""
+    try:
+        return _feature_summary(load_dataset())
+    except FileNotFoundError:
+        return {}
+
+
+def head_importances(top_k: int = 5) -> list[dict]:
+    """Per-head feature weights from the active bundle's artifact, top_k each.
+    [{id, name, kind, available, features: [{column, label, importance}]}].
+    Returns each head as unavailable if the artifact can't be loaded (e.g. a
+    numpy/joblib version drift) — retraining the GST model fixes that."""
+    try:
+        loaded = _load_active()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("GST head_importances: active artifact unreadable (%s) — retrain needed.", exc)
+        loaded = None
+    if loaded is None:
+        return [
+            {"id": h["id"], "name": h["name"], "kind": h["kind"], "available": False,
+             "note": "Model artifact unreadable — retrain the GST model."}
+            for h in _HEADS
+        ]
+    heads = (loaded or {}).get("artifact", {}).get("heads") or {}
+    out: list[dict] = []
+    for hid, h in heads.items():
+        imp = h.get("importance") or {}
+        if not imp:
+            out.append({"id": hid, "name": h.get("name", hid), "kind": h.get("kind"),
+                        "available": False, "note": "Estimator exposes no feature weights."})
+            continue
+        ranked = sorted(imp.items(), key=lambda kv: kv[1], reverse=True)
+        total = sum(v for _, v in ranked) or 1.0
+        out.append({
+            "id": hid, "name": h.get("name", hid), "kind": h.get("kind"), "available": True,
+            "features": [
+                {"column": col, "label": _label(col), "importance": round(v / total, 4)}
+                for col, v in ranked[:top_k]
+            ],
+        })
+    return out
 
 
 def set_active_version(n: int) -> bool:
