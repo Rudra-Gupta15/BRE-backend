@@ -2,6 +2,7 @@ from fastapi import APIRouter
 from pydantic import BaseModel
 
 from app.data.data_source_rules import rules_for
+from app.data.rule_descriptions import describe_rule
 from app.state.data_source_rule_state import data_source_rule_state
 
 router = APIRouter(prefix="/data-source-rules", tags=["data-source-rules"])
@@ -11,7 +12,7 @@ router = APIRouter(prefix="/data-source-rules", tags=["data-source-rules"])
 async def get_rules(source_id: str):
     """The rule catalogue + enabled state for one data source. Unknown / rule-less
     sources return an empty list (the popup shows its empty state)."""
-    rules = rules_for(source_id)
+    rules = [{**r, "description": describe_rule(r["label"])} for r in rules_for(source_id)]
     return {
         "id": source_id,
         "rules": rules,

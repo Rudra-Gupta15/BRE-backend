@@ -12,11 +12,18 @@ _CACHE_FILE = Path(__file__).resolve().parents[2] / ".published_sources_cache.js
 _VALID = {"published", "unpublished", "draft"}
 _DEFAULT = "unpublished"
 
+# Starting point ONLY — used when the user has never set any status. As soon as
+# they publish / unpublish / draft anything, their choices are what persist.
+_SEED_PUBLISHED = ("account_aggregator", "gst_data")
+
 
 class PublishedState:
     def __init__(self):
         self.statuses: dict[str, str] = {}
         self._load()
+        if not self.statuses:  # fresh install — seed the two default feeds
+            self.statuses = {sid: "published" for sid in _SEED_PUBLISHED}
+            self.persist()
 
     @property
     def published_ids(self) -> list[str]:
