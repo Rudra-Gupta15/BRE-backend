@@ -24,8 +24,16 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 from sklearn.ensemble import HistGradientBoostingClassifier, HistGradientBoostingRegressor
-from sklearn.metrics import accuracy_score, f1_score, mean_absolute_error, r2_score
-from sklearn.model_selection import KFold, StratifiedKFold, cross_val_predict
+from sklearn.metrics import (
+    accuracy_score,
+    f1_score,
+    mean_absolute_error,
+    mean_squared_error,
+    precision_score,
+    r2_score,
+    recall_score,
+)
+from sklearn.model_selection import KFold, StratifiedKFold
 from sklearn.preprocessing import StandardScaler
 
 from app.gst.schema import CATEGORICAL, DROP, FLAG_TARGET, RISK_ORDER, SCORE_TARGET
@@ -151,6 +159,7 @@ ALGORITHMS = ("gradient_boosting", "xgboost", "random_forest", "logistic_regress
 def _reg(algorithm: str = "gradient_boosting"):
     alg = (algorithm or "gradient_boosting").lower()
     if alg == "xgboost":
+        # pyrefly: ignore [missing-import]
         from xgboost import XGBRegressor
         return XGBRegressor(n_estimators=300, max_depth=4, learning_rate=0.07, subsample=0.9,
                             colsample_bytree=0.9, n_jobs=-1, random_state=42)
@@ -166,6 +175,7 @@ def _reg(algorithm: str = "gradient_boosting"):
 def _clf(algorithm: str = "gradient_boosting"):
     alg = (algorithm or "gradient_boosting").lower()
     if alg == "xgboost":
+        # pyrefly: ignore [missing-import]
         from xgboost import XGBClassifier
         return XGBClassifier(n_estimators=300, max_depth=4, learning_rate=0.07, subsample=0.9,
                              colsample_bytree=0.9, eval_metric="logloss", n_jobs=-1, random_state=42)
@@ -181,9 +191,18 @@ def _clf(algorithm: str = "gradient_boosting"):
     return HistGradientBoostingClassifier(max_iter=250, learning_rate=0.07, random_state=42)
 
 
+_N_FOLDS = 3
+
+
+def _fold_status(fold_val: float, mean_val: float, tol: float) -> str:
+    return "PASSED" if abs(fold_val - mean_val) <= tol else "REVIEW"
+
+
 def _train_one_head(df: pd.DataFrame, spec: dict, algorithm: str = "gradient_boosting") -> dict:
-    """Fit + 3-fold CV one head. Returns fitted estimator, its scaler, feature
-    list, classes and real CV metrics."""
+    """Fit + real N-fold CV one head. Returns the fitted estimator, its scaler,
+    feature list, classes, the back-compat `metrics` block and — for the Model
+    Evaluation panel — `evalMetrics` (shared metric slots) + per-fold `cvFolds`,
+    in the same shape ml_trainer.evaluate_trained produces for the bank models."""
     if spec["target"] not in df.columns:
         raise ValueError(f"Dataset missing head target '{spec['target']}'.")
     X = _feature_frame(df, exclude={spec["target"], *spec["extraExclude"]})
@@ -192,30 +211,93 @@ def _train_one_head(df: pd.DataFrame, spec: dict, algorithm: str = "gradient_boo
     Xv = Xs.transform(X.to_numpy(float))
     y, classes = _make_target(df, spec)
 
+    eval_metrics: dict | None = None
+    cv_folds: list[dict] = []
+
     if spec["kind"] == "regressor":
-        pred = cross_val_predict(_reg(algorithm), Xv, y, cv=KFold(3, shuffle=True, random_state=42))
-        mae = float(mean_absolute_error(y, pred))
-        metrics = {"r2": round(float(r2_score(y, pred)), 4), "mae": round(mae, 3)}
+        thr = float(np.median(y))
+        kf = KFold(n_splits=_N_FOLDS, shuffle=True, random_state=42)
+        r2s, mses, maes, precs, recs, f1s = [], [], [], [], [], []
+        for tr, te in kf.split(Xv):
+            est_f = _reg(algorithm).fit(Xv[tr], y[tr])
+            p = est_f.predict(Xv[te])
+            r2s.append(float(r2_score(y[te], p)))
+            mses.append(float(mean_squared_error(y[te], p)))
+            maes.append(float(mean_absolute_error(y[te], p)))
+            precs.append(float(precision_score(y[te] > thr, p > thr, zero_division=0)))
+            recs.append(float(recall_score(y[te] > thr, p > thr, zero_division=0)))
+            f1s.append(float(f1_score(y[te] > thr, p > thr, zero_division=0)))
+        m_r2, m_mae = float(np.mean(r2s)), float(np.mean(maes))
+        metrics = {"r2": round(m_r2, 4), "mae": round(m_mae, 3)}
         unit = spec.get("unit", "")
         if unit == "inr":
-            mae_s = f"₹{mae:,.0f}"
+            mae_s = f"₹{m_mae:,.0f}"
         elif unit == "pct":
-            mae_s = f"{mae:.1f}%"
+            mae_s = f"{m_mae:.1f}%"
         else:
-            mae_s = f"{mae:.2f}"
+            mae_s = f"{m_mae:.2f}"
         acc = f"R² {metrics['r2']:.2f}"
-        line = f"3-fold CV · R² {metrics['r2']} · MAE {mae_s}"
+        line = f"{_N_FOLDS}-fold CV · R² {metrics['r2']} · MAE {mae_s}"
+        eval_metrics = {
+            "r2Score": f"{m_r2:.3f}", "mse": f"{np.mean(mses):.4f}",
+            "precision": f"{np.mean(precs) * 100:.1f}%", "recall": f"{np.mean(recs) * 100:.1f}%",
+            "mae": f"{m_mae:.4f}", "f1Score": f"{np.mean(f1s):.3f}",
+            "metricMeta": {
+                "r2Score": {"name": "R² SCORE", "sub": f"Variance explained ({_N_FOLDS}-fold CV)"},
+                "mse": {"name": "MSE", "sub": "Mean squared error"},
+                "mae": {"name": "MAE", "sub": "Mean absolute error"},
+                "precision": {"name": "PRECISION", "sub": "Above-median band, positive predictive value"},
+                "recall": {"name": "RECALL", "sub": "Above-median band, sensitivity"},
+                "f1Score": {"name": "F1 SCORE", "sub": "Harmonic mean of P & R"},
+                "cvTitle": f"{_N_FOLDS}-Fold Cross Validation — real refit per fold",
+            },
+        }
+        cv_folds = [
+            {
+                "fold": f"Fold {i + 1}", "r2": f"{r2s[i]:.3f}", "mse": f"{mses[i]:.4f}",
+                "precision": f"{precs[i] * 100:.1f}%", "recall": f"{recs[i] * 100:.1f}%",
+                "mae": f"{maes[i]:.4f}", "status": _fold_status(r2s[i], m_r2, 0.08),
+            }
+            for i in range(_N_FOLDS)
+        ]
     else:
         metrics = {}
-        if len(classes) > 1 and np.bincount(y).min() >= 3:
-            pred = cross_val_predict(
-                _clf(algorithm), Xv, y, cv=StratifiedKFold(3, shuffle=True, random_state=42))
-            metrics = {
-                "accuracy": round(float(accuracy_score(y, pred)), 4),
-                "f1": round(float(f1_score(y, pred, average="weighted", zero_division=0)), 4),
+        if len(classes) > 1 and np.bincount(y).min() >= _N_FOLDS:
+            skf = StratifiedKFold(n_splits=_N_FOLDS, shuffle=True, random_state=42)
+            accs, precs, recs, f1s = [], [], [], []
+            for tr, te in skf.split(Xv, y):
+                est_f = _clf(algorithm).fit(Xv[tr], y[tr])
+                p = est_f.predict(Xv[te])
+                accs.append(float(accuracy_score(y[te], p)))
+                precs.append(float(precision_score(y[te], p, average="weighted", zero_division=0)))
+                recs.append(float(recall_score(y[te], p, average="weighted", zero_division=0)))
+                f1s.append(float(f1_score(y[te], p, average="weighted", zero_division=0)))
+            m_acc = float(np.mean(accs))
+            metrics = {"accuracy": round(m_acc, 4), "f1": round(float(np.mean(f1s)), 4)}
+            eval_metrics = {
+                "r2Score": f"{m_acc:.3f}", "mse": "—",
+                "precision": f"{np.mean(precs) * 100:.1f}%", "recall": f"{np.mean(recs) * 100:.1f}%",
+                "mae": f"{1 - m_acc:.4f}", "f1Score": f"{np.mean(f1s):.3f}",
+                "metricMeta": {
+                    "r2Score": {"name": "ACCURACY", "sub": f"Correct predictions ({_N_FOLDS}-fold CV)"},
+                    "mse": {"name": "CLASSES", "sub": f"{len(classes)} risk bands"},
+                    "mae": {"name": "ERROR RATE", "sub": "1 − accuracy"},
+                    "precision": {"name": "PRECISION", "sub": "Weighted positive predictive value"},
+                    "recall": {"name": "RECALL", "sub": "Weighted sensitivity"},
+                    "f1Score": {"name": "F1 SCORE", "sub": "Weighted harmonic mean of P & R"},
+                    "cvTitle": f"{_N_FOLDS}-Fold Stratified Cross Validation — real refit per fold",
+                },
             }
+            cv_folds = [
+                {
+                    "fold": f"Fold {i + 1}", "r2": f"{accs[i]:.3f}", "mse": "—",
+                    "precision": f"{precs[i] * 100:.1f}%", "recall": f"{recs[i] * 100:.1f}%",
+                    "mae": f"{1 - accs[i]:.4f}", "status": _fold_status(accs[i], m_acc, 0.05),
+                }
+                for i in range(_N_FOLDS)
+            ]
         acc = f"{metrics.get('accuracy', 0) * 100:.1f}%"
-        line = (f"3-fold CV · acc {metrics.get('accuracy', 0) * 100:.1f}% · "
+        line = (f"{_N_FOLDS}-fold CV · acc {metrics.get('accuracy', 0) * 100:.1f}% · "
                 f"F1 {metrics.get('f1', 0):.2f} · {len(classes)} classes")
 
     est = _reg(algorithm) if spec["kind"] == "regressor" else _clf(algorithm)
@@ -231,6 +313,7 @@ def _train_one_head(df: pd.DataFrame, spec: dict, algorithm: str = "gradient_boo
         "importance": ({feat[i]: float(imp[i]) for i in range(len(feat))}
                        if imp is not None else {}),
         "metrics": metrics, "accuracyLabel": acc, "metricLine": line,
+        "evalMetrics": eval_metrics, "cvFolds": cv_folds,
         "nFeatures": len(feat),
     }
 
@@ -346,7 +429,8 @@ def train(algorithm: str = "gradient_boosting") -> dict:
         {"id": h["id"], "name": h["name"], "desc": h["desc"], "kind": h["kind"],
          "target": h["target"], "metrics": h["metrics"], "accuracyLabel": h["accuracyLabel"],
          "metricLine": h["metricLine"], "nFeatures": h["nFeatures"],
-         "classes": h["classes"]}
+         "classes": h["classes"],
+         "evalMetrics": h.get("evalMetrics"), "cvFolds": h.get("cvFolds", [])}
         for h in heads
     ]
     meta = {
@@ -456,6 +540,75 @@ def active_heads_meta() -> dict:
             "algorithm": algo,
         }
     return out
+
+
+def _active_version(reg: dict | None = None) -> dict | None:
+    reg = reg or _read_registry()
+    active = reg.get("active")
+    versions = reg.get("versions", [])
+    return next((x for x in versions if x["version"] == active),
+                versions[-1] if versions else None)
+
+
+def head_evaluations() -> dict:
+    """{head_id: {name, kind, evalMetrics, cvFolds}} for the active bundle —
+    feeds the Model Evaluation panel's GST rows and per-head detail. Only heads
+    that actually cross-validated (enough rows / classes) are returned."""
+    v = _active_version()
+    if not v:
+        return {}
+    out: dict = {}
+    for h in v.get("heads", []):
+        if h.get("evalMetrics"):
+            out[h["id"]] = {
+                "name": h.get("name"),
+                "kind": h.get("kind"),
+                "evalMetrics": h["evalMetrics"],
+                "cvFolds": h.get("cvFolds", []),
+            }
+    return out
+
+
+def eval_context() -> dict:
+    """Algorithm + trained-at for the active bundle (panel sub-header)."""
+    v = _active_version()
+    if not v:
+        return {}
+    return {"algorithm": v.get("algorithm", "gradient_boosting"), "trainedAt": v.get("trainedAt")}
+
+
+def reevaluate() -> dict:
+    """Recompute every head's CV metrics on the current corpus for the ACTIVE
+    bundle's algorithm and write them back into registry.json in place — no new
+    version, no re-signing of the artifact. Mirrors the bank 'Re-evaluate'
+    button. Returns head_evaluations()."""
+    reg = _read_registry()
+    v = _active_version(reg)
+    if not v:
+        return {}
+    algo = v.get("algorithm", "gradient_boosting")
+    df = load_dataset()
+    fresh = {}
+    for spec in _HEADS:
+        if spec["target"] not in df.columns:
+            continue
+        try:
+            h = _train_one_head(df, spec, algo)
+        except (ValueError, KeyError):
+            logger.exception("GST re-evaluate: head '%s' failed", spec["id"])
+            continue
+        fresh[h["id"]] = h
+    for hm in v.get("heads", []):
+        f = fresh.get(hm["id"])
+        if not f:
+            continue
+        hm["evalMetrics"] = f.get("evalMetrics")
+        hm["cvFolds"] = f.get("cvFolds", [])
+        hm["metrics"] = f["metrics"]
+        hm["accuracyLabel"] = f["accuracyLabel"]
+        hm["metricLine"] = f["metricLine"]
+    _write_registry(reg)
+    return head_evaluations()
 
 
 def set_active_version(n: int) -> bool:

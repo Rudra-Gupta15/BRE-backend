@@ -1,4 +1,5 @@
 import asyncio
+import logging
 from datetime import datetime, timezone
 from functools import partial
 
@@ -18,6 +19,8 @@ from app.services.persistence import (
 from app.services.security import lineage, poisoning
 from app.state.models_state import known_model_ids, models_state
 from app.state.session_state import session_state
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/models", tags=["models"])
 
@@ -246,16 +249,40 @@ async def train_from_dataset(
     return {"ingest": ingest, "batchId": batch_id, **result}
 
 
+def _gst_head_evaluations() -> dict:
+    """{head_id: {evalMetrics, cvFolds, name}} for the active GST bundle, or {}."""
+    try:
+        from app.gst import model as gst_model
+        return gst_model.head_evaluations()
+    except Exception:  # noqa: BLE001 — GST is optional; never break bank eval
+        logger.exception("GST head evaluations unavailable")
+        return {}
+
+
 @router.get("/evaluation")
 async def get_evaluation(model_id: str = "risk_model"):
-    """Real 5-fold cross-validation results for the models trained on the Model
-    Hub page (computed at training time, cached on models_state)."""
+    """Real cross-validation results for the models trained on the Model Hub
+    page (bank models: 5-fold, cached on models_state; GST heads: 3-fold, read
+    from the GST registry)."""
     cache = models_state.evaluation_cache or {}
+    ev = cache.get(model_id)
+    trained_at = (models_state.last_training_run or {}).get("trainedAt")
+
+    if ev is None:
+        gst = _gst_head_evaluations().get(model_id)
+        if gst:
+            ev = {"evalMetrics": gst["evalMetrics"], "cvFolds": gst["cvFolds"]}
+            try:
+                from app.gst import model as gst_model
+                trained_at = gst_model.eval_context().get("trainedAt") or trained_at
+            except Exception:  # noqa: BLE001
+                pass
+
     return {
         "modelId": model_id,
-        "evaluation": cache.get(model_id),
-        "available": list(cache.keys()),
-        "trainedAt": (models_state.last_training_run or {}).get("trainedAt"),
+        "evaluation": ev,
+        "available": list(cache.keys()) + list(_gst_head_evaluations().keys()),
+        "trainedAt": trained_at,
     }
 
 
@@ -300,17 +327,75 @@ async def evaluation_summary():
             "trainedAt": active.get("trainedAt"),
         }
 
+    # ── GST heads — same shape as a session-model row, own CV (3-fold) ────────
+    # Bundles trained before the panel existed carry no per-fold metrics; the
+    # first summary call after that backfills them once (in a worker thread).
+    gst_evals = _gst_head_evaluations()
+    if not gst_evals:
+        try:
+            from app.gst import model as gst_model
+            if gst_model.is_trained():
+                loop = asyncio.get_event_loop()
+                gst_evals = await loop.run_in_executor(None, gst_model.reevaluate)
+        except Exception:  # noqa: BLE001
+            logger.exception("GST eval backfill failed")
+
+    gst_models = []
+    gst_ctx = {}
+    for hid, ev in gst_evals.items():
+        em = ev.get("evalMetrics", {})
+        meta = em.get("metricMeta", {})
+        gst_models.append({
+            "modelId": hid,
+            "name": ev.get("name", hid),
+            "kind": "gst",
+            "metricLabel": meta.get("r2Score", {}).get("name", "Score"),
+            "metricValue": em.get("r2Score"),
+            "precision": em.get("precision"),
+            "recall": em.get("recall"),
+            "f1": em.get("f1Score"),
+            "folds": len(ev.get("cvFolds", [])),
+        })
+    if gst_models:
+        try:
+            from app.gst import model as gst_model
+            gst_ctx = gst_model.eval_context()
+        except Exception:  # noqa: BLE001
+            logger.exception("GST eval context unavailable")
+
     return {
         "sessionModels": session_models,
         "sessionAlgorithm": run.get("algorithm"),
         "sessionTrainedAt": run.get("trainedAt"),
         "sessionTxCount": run.get("txCount"),
         "datasetModel": dataset_model,
+        "gstModels": gst_models,
+        "gstAlgorithm": gst_ctx.get("algorithm"),
+        "gstTrainedAt": gst_ctx.get("trainedAt"),
     }
 
 
 @router.post("/evaluation/{model_id}/re-run")
 async def rerun_evaluation(model_id: str):
+    # ── GST head → recompute on the active GST bundle (no new version) ────────
+    from app.gst.model import HEAD_IDS
+
+    if model_id in HEAD_IDS:
+        from app.gst import model as gst_model
+
+        loop = asyncio.get_event_loop()
+        try:
+            evals = await loop.run_in_executor(None, gst_model.reevaluate)
+        except (ValueError, FileNotFoundError) as exc:
+            raise HTTPException(400, str(exc))
+        gst = evals.get(model_id)
+        if not gst:
+            raise HTTPException(400, "Train the GST model first (GST data source).")
+        return {
+            "modelId": model_id,
+            "evaluation": {"evalMetrics": gst["evalMetrics"], "cvFolds": gst["cvFolds"]},
+        }
+
     if model_id not in known_model_ids():
         raise HTTPException(404, f"Unknown model '{model_id}'.")
     if not models_state.trained_sklearn_map.get(model_id):

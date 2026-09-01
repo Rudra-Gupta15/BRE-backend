@@ -6,7 +6,10 @@ def _default_version_map():
 
 
 def _default_deployed_map():
-    return {"risk_model": "Deployed", "cashflow_model": "Deployed", "fraud_model": "Ready", "money_balance_model": "Ready"}
+    # Every model ships deployed by default. A Revoke pulls one from the live
+    # registry (and from Model Testing's "Select Models"); a browser reload
+    # hits /reset and restores all four to Deployed.
+    return {"risk_model": "Deployed", "cashflow_model": "Deployed", "fraud_model": "Deployed", "money_balance_model": "Deployed"}
 
 
 class ModelsState:
