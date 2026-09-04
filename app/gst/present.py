@@ -8,7 +8,8 @@ from __future__ import annotations
 
 def _f(v, default: float = 0.0) -> float:
     try:
-        return float(str(v).replace(",", "").replace("₹", "").replace("%", "").strip())
+        f = float(str(v).replace(",", "").replace("₹", "").replace("%", "").strip())
+        return f if f == f else default  # str(nan) parses back to nan without raising — catch it here
     except (TypeError, ValueError):
         return default
 

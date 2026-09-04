@@ -82,34 +82,37 @@ def _parse_coverage_percent(source: dict | None) -> float:
     return UNKNOWN_SOURCE_COVERAGE
 
 
-def compute_noise(selected_ids: list[str], uploaded_files: dict, sources: list[dict] | None = None) -> int:
-    """Computes a "data noise" percentage from the real cleanliness of each
-    selected source's uploaded file (see file_analysis.py, which scans the
-    actual uploaded bytes). A source with no uploaded file contributes 0 (no
-    data to be clean); one that was auto-filled (no real bytes to scan)
-    falls back to that source's documented coverage metric. Cleanliness =
-    100 - noise; the pipeline treats cleanliness <= 60% (noise > 40%) as
-    needing the LLM cleaning stage, matching the platform's documented
-    threshold."""
-    if not selected_ids:
-        return 60
-
+def compute_noise_by_source(selected_ids: list[str], uploaded_files: dict,
+                             sources: list[dict] | None = None) -> dict[str, dict]:
+    """Per-source "data noise" — never blended into one averaged number,
+    since averaging a clean source against a dirty one hides the dirty one.
+    A source with no uploaded file contributes 0 cleanliness (no data to be
+    clean); one that was auto-filled (no real bytes to scan) falls back to
+    that source's documented coverage metric. Cleanliness = 100 - noise; each
+    source crossing noise > 40% needs its own LLM cleaning pass, matching the
+    platform's documented threshold — independently of every other source."""
     sources = sources or []
     source_map = {s["id"]: s for s in sources}
 
-    cleanliness_scores = []
+    out: dict[str, dict] = {}
     for source_id in selected_ids:
         upload = uploaded_files.get(source_id)
         if not upload:
-            cleanliness_scores.append(0)
+            cleanliness = 0.0
         elif isinstance(upload.get("cleanlinessPercent"), (int, float)):
-            cleanliness_scores.append(upload["cleanlinessPercent"])
+            cleanliness = upload["cleanlinessPercent"]
         else:
-            cleanliness_scores.append(_parse_coverage_percent(source_map.get(source_id)))
-
-    avg_cleanliness = sum(cleanliness_scores) / len(cleanliness_scores)
-    noise = round(100 - avg_cleanliness)
-    return min(95, max(1, noise))
+            cleanliness = _parse_coverage_percent(source_map.get(source_id))
+        noise = min(95, max(1, round(100 - cleanliness)))
+        out[source_id] = {
+            "label": source_map.get(source_id, {}).get("title", source_id),
+            "cleanlinessPercent": round(cleanliness),
+            "noisePercent": noise,
+            "llmActive": noise > 40,
+            "fileCount": upload.get("fileCount") if upload else 0,
+            "worstFileName": upload.get("worstFileName") if upload else None,
+        }
+    return out
 
 
 # ── Stage helpers ─────────────────────────────────────────────────────────────
@@ -196,36 +199,154 @@ def _stage1_gather(selected_ids: list[str], parsed_statements: dict) -> dict:
 
 # ── Stage 2: Preprocess Data ───────────────────────────────────────────────────
 
-def _stage2_preprocess(gathered: dict) -> dict:
-    t0 = time.perf_counter()
-    cleaned = {}
-    total_rows = dropped_rows = imputed_rows = 0
-    for sid, txns in gathered.items():
-        last_balance = None
-        clean_list = []
-        for t in txns:
-            total_rows += 1
-            amount = t.get("amount")
+# A statement narration sometimes carries the amount even when the parser's
+# dedicated amount column failed to extract it — e.g. "UPI/mmt/Rs.1,250.00 to
+# XYZ". Real regex recovery, not a guess: only used when it actually matches.
+_NARRATION_AMOUNT_RE = re.compile(r"(?:rs\.?|inr|₹)\s*([\d,]+(?:\.\d{1,2})?)", re.IGNORECASE)
+
+
+def _recover_from_narration(narration: str) -> float | None:
+    m = _NARRATION_AMOUNT_RE.search(narration or "")
+    if not m:
+        return None
+    try:
+        v = float(m.group(1).replace(",", ""))
+    except ValueError:
+        return None
+    return v if v > 0 else None
+
+
+_DEBIT_HINTS  = ("wdl", "withdrawal", "purchase", "pos ", "payment", "paid", "debit", "emi", "bill", "atm")
+_CREDIT_HINTS = ("salary", "credit", "interest", "refund", "reversal", "deposit", "received")
+
+
+def _guess_type_from_narration(narration: str) -> str | None:
+    low = (narration or "").lower()
+    if any(k in low for k in _DEBIT_HINTS):
+        return "DEBIT"
+    if any(k in low for k in _CREDIT_HINTS):
+        return "CREDIT"
+    return None
+
+
+def _clean_one_source(txns: list[dict], *, recover: bool) -> dict:
+    """Baseline (recover=False): drop rows with no usable amount, forward-fill
+    missing balance — unchanged behaviour for a source under the noise
+    threshold. AI recovery pass (recover=True, only run for a source whose
+    noise > 40%): before giving up on a row, try to reconstruct its amount
+    from the running balance delta, then from the narration text (with a
+    keyword-based debit/credit guess when the type is unknown too); a row is
+    only dropped once neither recovery path finds anything — and every drop
+    gets a specific, real reason instead of a bare count. The running balance
+    updates from every row that carries one, even a dropped row — its own
+    amount being unrecoverable doesn't make its balance snapshot any less
+    real, and the next row's delta recovery depends on it."""
+    last_balance = None
+    clean_list, dropped_detail = [], []
+    recovered_rows = imputed_rows = 0
+    for t in txns:
+        amount = t.get("amount")
+        tx_type = t.get("type")
+        row_balance = t.get("balance")
+        has_amount = isinstance(amount, (int, float)) and amount > 0
+        guessed_type = False
+
+        if not has_amount and recover:
+            method = None
+            if isinstance(row_balance, (int, float)) and isinstance(last_balance, (int, float)):
+                delta = round(row_balance - last_balance, 2)
+                if delta != 0:
+                    amount = abs(delta)
+                    if not tx_type:
+                        tx_type = "CREDIT" if delta > 0 else "DEBIT"
+                    method = f"inferred from balance change ({last_balance:,.2f} → {row_balance:,.2f})"
             if amount is None or amount <= 0:
-                dropped_rows += 1
-                continue
-            balance = t.get("balance")
-            if balance is None:
-                balance = last_balance
-                if balance is not None:
-                    imputed_rows += 1
-            else:
-                last_balance = balance
-            clean_list.append({**t, "balance": balance})
-        cleaned[sid] = clean_list
+                narr_amount = _recover_from_narration(t.get("narration", ""))
+                if narr_amount:
+                    inferred_type = tx_type or _guess_type_from_narration(t.get("narration", ""))
+                    if inferred_type:
+                        amount = narr_amount
+                        tx_type = inferred_type
+                        guessed_type = not t.get("type")
+                        method = f"amount pattern found in narration ({t.get('narration', '')[:60]!r})"
+            if method:
+                has_amount = True
+                recovered_rows += 1
+
+        # The balance snapshot on THIS row is real, observed data regardless
+        # of whether we could work out an amount for it — carry it forward
+        # so a later row can still delta against it.
+        if isinstance(row_balance, (int, float)):
+            last_balance = row_balance
+
+        if not has_amount:
+            reason = (
+                "no amount value, and " + (
+                    "the running balance shows no change to infer a delta"
+                    if isinstance(row_balance, (int, float)) and isinstance(last_balance, (int, float))
+                    else "no balance on this or an earlier row to infer a delta"
+                ) + ", and no amount pattern in the narration"
+                if recover else
+                "missing or non-positive amount"
+            )
+            dropped_detail.append({
+                "date": t.get("date") or "—",
+                "narration": (t.get("narration") or "")[:80] or "(no narration)",
+                "reason": reason,
+            })
+            continue
+
+        balance = row_balance
+        if balance is None:
+            balance = last_balance
+            if balance is not None:
+                imputed_rows += 1
+        entry = {**t, "amount": amount, "type": tx_type or t.get("type"), "balance": balance}
+        if guessed_type:
+            entry["_recoveryNote"] = "type guessed from narration wording"
+        clean_list.append(entry)
+
+    return {
+        "cleaned": clean_list, "totalRows": len(txns), "droppedRows": len(dropped_detail),
+        "recoveredRows": recovered_rows, "imputedRows": imputed_rows, "droppedDetail": dropped_detail,
+    }
+
+
+def _stage2_preprocess(gathered: dict, noise_by_source: dict | None = None) -> dict:
+    t0 = time.perf_counter()
+    noise_by_source = noise_by_source or {}
+    cleaned, by_source = {}, {}
+    total_rows = dropped_rows = imputed_rows = recovered_rows = 0
+    for sid, txns in gathered.items():
+        recover = bool(noise_by_source.get(sid, {}).get("llmActive"))
+        r = _clean_one_source(txns, recover=recover)
+        cleaned[sid] = r["cleaned"]
+        total_rows += r["totalRows"]
+        dropped_rows += r["droppedRows"]
+        recovered_rows += r["recoveredRows"]
+        imputed_rows += r["imputedRows"]
+        by_source[sid] = {
+            "mode": "ai_recovery" if recover else "baseline",
+            "totalRows": r["totalRows"], "droppedRows": r["droppedRows"],
+            "recoveredRows": r["recoveredRows"],
+            "droppedDetail": r["droppedDetail"][:25],
+            "droppedDetailTruncated": max(0, len(r["droppedDetail"]) - 25),
+        }
     duration_ms = round((time.perf_counter() - t0) * 1000, 2)
+    ai_sources = [sid for sid, r in by_source.items() if r["mode"] == "ai_recovery"]
     detail = (
-        f"Cleaned {total_rows} raw row(s) — dropped {dropped_rows} invalid "
-        f"(missing/non-positive amount), forward-filled {imputed_rows} missing balance(s)."
+        f"Cleaned {total_rows} raw row(s) — dropped {dropped_rows} unusable, "
+        f"forward-filled {imputed_rows} missing balance(s)."
     )
+    if ai_sources:
+        detail += (
+            f" AI recovery pass ran on {len(ai_sources)} high-noise source(s), "
+            f"recovering {recovered_rows} row(s) that baseline cleaning would have dropped."
+        )
     return {
         "cleaned": cleaned, "totalRows": total_rows, "droppedRows": dropped_rows,
-        "imputedRows": imputed_rows, "durationMs": duration_ms, "detail": detail,
+        "imputedRows": imputed_rows, "recoveredRows": recovered_rows,
+        "bySource": by_source, "durationMs": duration_ms, "detail": detail,
     }
 
 
@@ -447,11 +568,14 @@ def run_pipeline(
     parsed_statements: dict | None = None,
 ) -> dict:
     parsed_statements = parsed_statements or {}
-    noise_percent = compute_noise(selected_ids, uploaded_files, sources)
-    llm_active = noise_percent > 40
+    noise_by_source = compute_noise_by_source(selected_ids, uploaded_files, sources)
+    # Back-compat single figures (worst source wins — never an average that
+    # could hide one dirty source behind clean ones).
+    noise_percent = max((v["noisePercent"] for v in noise_by_source.values()), default=1)
+    llm_active = any(v["llmActive"] for v in noise_by_source.values())
 
     s1 = _stage1_gather(selected_ids, parsed_statements)
-    s2 = _stage2_preprocess(s1["gathered"])
+    s2 = _stage2_preprocess(s1["gathered"], noise_by_source)
     s3 = _stage3_normalize(s2["cleaned"])
     s4 = _stage4_engineer(s3["perSource"])
     s5 = _stage5_select(s2["cleaned"], s4["perSource"])
@@ -490,6 +614,8 @@ def run_pipeline(
         "stages": stages,
         "noisePercent": noise_percent,
         "llmActive": llm_active,
+        "noiseBySource": noise_by_source,
+        "cleaningBySource": s2["bySource"],
         "processedTable": processed_table,
         "storedFile": stored_file,
         "selectedFeatures": s5["selectedFeatures"],

@@ -24,6 +24,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 from sklearn.ensemble import HistGradientBoostingClassifier, HistGradientBoostingRegressor
+from sklearn.inspection import permutation_importance
 from sklearn.metrics import (
     accuracy_score,
     f1_score,
@@ -304,13 +305,26 @@ def _train_one_head(df: pd.DataFrame, spec: dict, algorithm: str = "gradient_boo
     est.fit(Xv, y)
     Xdf = X  # the un-scaled feature frame — column means feed single-record predict
     imp = getattr(est, "feature_importances_", None)
+    if imp is None:
+        # HistGradientBoosting (this app's default "gradient_boosting" algorithm)
+        # exposes no native feature_importances_. Left as {}, every head's
+        # per-record "top factors" silently fall back to a generic |z-score|
+        # ranking — identical across all 4 heads for the same business, since
+        # it stops reflecting what THIS model actually learned to weight.
+        # Permutation importance is real and model-specific: it measures how
+        # much this head's own score/accuracy drops when a feature is shuffled.
+        try:
+            pi = permutation_importance(est, Xv, y, n_repeats=5, random_state=42, n_jobs=-1)
+            imp = pi.importances_mean
+        except Exception:  # noqa: BLE001 — importance is a display nicety, never blocks training
+            imp = None
     return {
         "id": spec["id"], "name": spec["name"], "desc": spec["desc"],
         "kind": spec["kind"], "target": spec["target"], "unit": spec.get("unit", ""),
         "est": est, "scaler": Xs, "feat": feat, "classes": classes,
         "means": {c: float(Xdf[c].mean()) for c in feat},
         "std": {c: float(Xdf[c].std() or 1.0) for c in feat},
-        "importance": ({feat[i]: float(imp[i]) for i in range(len(feat))}
+        "importance": ({feat[i]: max(0.0, float(imp[i])) for i in range(len(feat))}
                        if imp is not None else {}),
         "metrics": metrics, "accuracyLabel": acc, "metricLine": line,
         "evalMetrics": eval_metrics, "cvFolds": cv_folds,

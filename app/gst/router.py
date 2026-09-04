@@ -1,6 +1,8 @@
+import asyncio
 import logging
+from functools import partial
 
-from fastapi import APIRouter, File, HTTPException, UploadFile
+from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel
 
 from app.gst import aggregate, model, returns, rules, service
@@ -163,11 +165,18 @@ async def toggle_head_deploy(head_id: str):
 
 
 @router.post("/train")
-async def train_model(file: UploadFile | None = File(default=None)):
-    """Train / retrain. Optionally upload a file of GST rows first (a flat
-    per-business summary, or GSTR-1/3B/2A/2B returns which are rolled into
-    profiles) — appended to the corpus, then training runs on everything.
-    Old model versions are kept."""
+async def train_model(algorithm: str = Form("gradient_boosting"),
+                       file: UploadFile | None = File(default=None)):
+    """Train / retrain the 4 GST heads + the Fraud/Anomaly Pattern models —
+    the Model Hub "Start Training" button posts here directly for
+    sourceId == "gst_data" (no shared /models/train dispatcher). Optionally
+    upload a file of GST rows first (a flat per-business summary, or
+    GSTR-1/3B/2A/2B returns which are rolled into profiles) — appended to
+    the corpus, then training runs on everything. Old model versions are
+    kept. multipart/form-data because of `file`, not JSON — see api.postForm
+    on the frontend."""
+    from datetime import datetime, timezone
+
     appended = 0
     if file is not None:
         raw = await file.read()
@@ -177,18 +186,54 @@ async def train_model(file: UploadFile | None = File(default=None)):
             raise HTTPException(400, f"Could not read the training file: {exc}")
         appended = res.get("corpusRows") or res.get("businesses") or res.get("records") or 0
 
+    loop = asyncio.get_event_loop()
     try:
-        result = model.train()
-    except (ValueError, FileNotFoundError) as exc:
+        result = await loop.run_in_executor(None, partial(service.train_for_hub, algorithm))
+    except (ValueError, FileNotFoundError, ImportError) as exc:
         raise HTTPException(400, str(exc))
     result["appendedRows"] = appended
-    try:
-        from app.gst import patterns
-        patterns.save_training_baseline()
-        patterns.train_pattern_models()
-    except Exception:  # noqa: BLE001
-        logger.warning("GST pattern-model training failed", exc_info=True)
+    result["trainedAt"] = datetime.now(timezone.utc).isoformat()
     return result
+
+
+@router.get("/evaluation/summary")
+async def evaluation_summary():
+    """Model Evaluation panel rows for GST — the 4 heads + the Fraud/Anomaly
+    Pattern models, real cross-validated. Twin of
+    /api/models/evaluation/summary and /api/bbps/evaluation/summary."""
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, service.evaluation_rows)
+
+
+@router.get("/evaluation")
+async def get_evaluation(model_id: str):
+    """Real cross-validation detail for one GST model id (a head or a Fraud/
+    Anomaly Pattern model) — the "shown below" per-fold table."""
+    ev = service.head_evaluations().get(model_id)
+    trained_at = None
+    if ev:
+        try:
+            trained_at = model.eval_context().get("trainedAt")
+        except Exception:  # noqa: BLE001
+            pass
+    return {
+        "modelId": model_id,
+        "evaluation": {"evalMetrics": ev["evalMetrics"], "cvFolds": ev["cvFolds"]} if ev else None,
+        "trainedAt": trained_at,
+    }
+
+
+@router.post("/evaluation/{model_id}/re-run")
+async def rerun_evaluation(model_id: str):
+    """Retrain/re-CV one GST model id — the "Re-evaluate" button."""
+    loop = asyncio.get_event_loop()
+    try:
+        result = await loop.run_in_executor(None, partial(service.rerun, model_id))
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    if result is None:
+        raise HTTPException(404, f"Unknown GST model '{model_id}'.")
+    return {"modelId": model_id, "evaluation": result}
 
 
 class RecordBody(BaseModel):

@@ -14,7 +14,8 @@ from app.aa.product_source_state import product_source_rule_state
 
 def _f(v, d: float = 0.0) -> float:
     try:
-        return float(str(v).replace(",", "").replace("₹", "").replace("%", "").strip())
+        f = float(str(v).replace(",", "").replace("₹", "").replace("%", "").strip())
+        return f if f == f else d  # str(nan) parses back to nan without raising — catch it here
     except (TypeError, ValueError):
         return d
 

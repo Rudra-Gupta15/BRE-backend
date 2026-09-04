@@ -10,7 +10,8 @@ logger = logging.getLogger(__name__)
 
 def _f(v, default=0.0) -> float:
     try:
-        return float(str(v).replace(",", "").strip())
+        f = float(str(v).replace(",", "").strip())
+        return f if f == f else default  # str(nan) parses back to nan without raising — catch it here
     except (TypeError, ValueError):
         return default
 

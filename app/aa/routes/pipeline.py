@@ -1,8 +1,10 @@
 """/pipeline routes — upload files for a data source and run the Model Hub
 pipeline. Bank statements parse + score here; sourceId=="gst_data" delegates
-to app.gst.service / app.gst.pipeline.
+to app.gst.service / app.gst.pipeline. sourceId=="bbps_utility" parses as a
+normal statement here too, then hands the transactions to app.bbps.analyze_bbps.
 """
 
+import logging
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
@@ -13,7 +15,10 @@ from app.common.persistence import log_security_event, save_statement
 from app.aa.pipeline import run_pipeline
 from app.common.security import guardrails, lineage
 from app.aa.parser import parse_statement
+from app import bbps
 from app.common.state.session import session_state
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/pipeline", tags=["pipeline"])
 
@@ -189,7 +194,13 @@ async def _ingest_gst_folder(source_id: str, incoming: list[UploadFile]):
             statements.append({"transactions": [], "summary": {}, "error": str(exc)})
             continue
         preds = res["predictions"]
-        analysis["cleanlinessPercent"] = res["completeness"]
+        # analysis["cleanlinessPercent"] stays the real byte/cell-level scan from
+        # analyze_file() above — it used to get overwritten with res["completeness"]
+        # (coverage against the full 53-field GSTR-return schema), which made a
+        # perfectly well-formed flat summary file — this one only carries 9 of
+        # those fields by design — look like it was almost entirely dirty. That
+        # coverage number is real and useful, just not "cleanliness"; it's kept
+        # under its own name in gst_block["completeness"] below.
         gst_block = {
             "mode": res["mode"], "records": res["records"], "businesses": res["businesses"],
             "returnsSeen": res.get("returnsSeen", {}),
@@ -273,12 +284,33 @@ async def _ingest_one(source_id: str, file: UploadFile) -> dict:
     }
     statement_id = save_statement(source_id, analysis, parsed, lineage=lin)
 
+    # BBPS Utility Payment History arrives as the same statement formats —
+    # BBPS payments are line items inside a real bank statement, not a
+    # separate feed — so mine the utility-bill subset out of what just parsed,
+    # evaluate the 16 BBPS rules against it, and score it with the trained
+    # BBPS model. A real statement's derived feature row also gets appended
+    # to the model's training corpus (real features; the label is still the
+    # documented weak-supervision formula — see app.bbps.model's docstring).
+    bbps_block = None
+    if source_id == "bbps_utility":
+        bbps_result = bbps.analyze_bbps(parsed["transactions"])
+        bbps_block = {**bbps_result, "rules": bbps.rules.evaluate_bbps_rules(bbps_result)}
+        fv = bbps.schema.feature_vector_from_analysis(bbps_result)
+        if fv is not None:
+            bbps_block["model"] = bbps.model.predict(fv)
+            try:
+                bbps.model.append_to_corpus(fv)
+            except Exception:  # noqa: BLE001 — corpus growth must never break an upload
+                logger.warning("Could not append BBPS statement to training corpus.", exc_info=True)
+        parsed["bbps"] = bbps_block
+
     meta = {
         **analysis,
         "autoFilled":         False,
         "statementSummary":   parsed["summary"],
         "transactionsParsed": len(parsed["transactions"]),
         "statementId":        statement_id,
+        **({"bbps": bbps_block} if bbps_block is not None else {}),
     }
     return {"meta": meta, "statement": parsed, "lineage": lin, "warnings": parse_warnings}
 
@@ -441,10 +473,16 @@ async def run_pipeline_handler(body: RunPipelineBody):
                 merged_parsed[sid] = m
             file_metas = session_state.files_for(sid)
             if file_metas:
-                scores = [f["cleanlinessPercent"] for f in file_metas
-                          if isinstance(f.get("cleanlinessPercent"), (int, float))]
+                scored = [f for f in file_metas if isinstance(f.get("cleanlinessPercent"), (int, float))]
+                # Worst file in the folder, not the average — a single dirty
+                # file must still trip the noise threshold for this source,
+                # not get diluted away by the clean files next to it. Named,
+                # not just counted, so the noise card can point at exactly
+                # which file needs attention.
+                worst = min(scored, key=lambda f: f["cleanlinessPercent"]) if scored else None
                 merged_uploads[sid] = {
-                    "cleanlinessPercent": round(sum(scores) / len(scores)) if scores else None,
+                    "cleanlinessPercent": worst["cleanlinessPercent"] if worst else None,
+                    "worstFileName": worst.get("fileName") if worst else None,
                     "autoFilled": all(f.get("autoFilled") for f in file_metas),
                     "fileCount": len(file_metas),
                 }
@@ -455,6 +493,8 @@ async def run_pipeline_handler(body: RunPipelineBody):
         "currentStage": len(result["stages"]),
         "noisePercent": result["noisePercent"],
         "llmActive": result["llmActive"],
+        "noiseBySource": result.get("noiseBySource", {}),
+        "cleaningBySource": result.get("cleaningBySource", {}),
         "processedTable": result["processedTable"],
         "lastRunAt": result["completedAt"],
     }

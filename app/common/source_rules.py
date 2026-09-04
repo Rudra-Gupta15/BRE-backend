@@ -170,6 +170,28 @@ _RAW: dict[str, list[str]] = {
         "Business Revenue Consistency Rule",
         "Final GST Underwriting Decision Rule",
     ],
+    # Every one of these is grounded in a real field app.bbps.analyze_bbps()
+    # actually computes from the statement's utility-tagged transactions — no
+    # padding to match AA/GST's rule count for a source with a narrower,
+    # single-signal scope.
+    "bbps_utility": [
+        "BBPS Data Presence Rule",
+        "Utility Account Count Rule",
+        "Utility Type Diversity Rule",
+        "Electricity Bill Payment Rule",
+        "Water Bill Payment Rule",
+        "Gas Bill Payment Rule",
+        "Broadband Bill Payment Rule",
+        "Mobile / DTH Bill Payment Rule",
+        "Recurring Utility Payment Rule",
+        "Utility Bill Punctuality Rule",
+        "Missed Utility Payment Rule",
+        "On-Time Payment Ratio Rule",
+        "Average Bill Amount Consistency Rule",
+        "Statement Span Sufficiency Rule",
+        "Utility Payment Frequency Rule",
+        "Final BBPS Underwriting Signal Rule",
+    ],
 }
 
 

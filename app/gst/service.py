@@ -7,6 +7,11 @@
   * a flat "one row per business" GST summary (the training-set shape).
 
 It parses, scores every business, and returns a Model-Hub-friendly summary.
+
+`train_for_hub` / `head_evaluations` / `evaluation_rows` / `rerun` are what
+app.aa.routes.models (the generic /models/* endpoints) calls into for
+sourceId == "gst_data" — GST's own training/evaluation shaping lives HERE,
+not in the generic route, so the route stays a thin dispatcher.
 """
 from __future__ import annotations
 
@@ -118,3 +123,136 @@ def ingest_gst_file(buf: bytes, file_name: str, *, add_to_corpus: bool = True) -
         "returnsSeen": {},
         "warnings": warnings,
     }
+
+
+# ── Model Hub training / evaluation (used by app.aa.routes.models) ─────────
+
+def train_cards(g: dict) -> list[dict]:
+    """One Model-Hub card per trained GST head (4 models)."""
+    from datetime import datetime
+
+    from app.aa.catalog import ML_ALGORITHMS
+
+    created = datetime.now().strftime("%Y-%m-%d %H:%M")
+    algo_label = next(
+        (a["label"] for a in ML_ALGORITHMS if a["value"] == g.get("algorithm")),
+        "Gradient Boosting",
+    )
+    return [
+        {
+            "id": h["id"], "name": h["name"], "desc": h["desc"],
+            "accuracy": h["accuracyLabel"], "algorithm": algo_label, "createdDate": created,
+            "cvFolds": 3, "sampleCount": g["nSamples"], "features": h["nFeatures"],
+            "realData": True, "kind": "gst",
+            "metrics": h["metrics"], "metricLine": h["metricLine"], "target": h["target"],
+            "modelKind": h["kind"], "version": g["version"], "classes": h.get("classes"),
+        }
+        for h in g.get("models", [])
+    ]
+
+
+def train_for_hub(algorithm: str) -> dict:
+    """Train the GST model + save its pattern-fraud baseline — the full
+    /models/train response body for sourceId == "gst_data" (minus
+    `trainedAt`, which the generic route stamps). Raises ValueError /
+    FileNotFoundError / ImportError on failure (route maps those to 400)."""
+    g = model.train(algorithm)
+    cards = train_cards(g)
+    try:
+        from app.gst import patterns
+        patterns.save_training_baseline()
+    except Exception:  # noqa: BLE001
+        logger.warning("GST pattern-baseline save failed", exc_info=True)
+    return {
+        "models": cards, "algorithm": algorithm,
+        "realFeatures": None, "gstFeatureSummary": g.get("featureSummary"),
+        "gstRegistry": model.registry_view(),
+        "txCount": g["nSamples"],
+    }
+
+
+def head_evaluations() -> dict:
+    """{head_id: {evalMetrics, cvFolds, name}} for the active GST bundle + the
+    GST Fraud/Anomaly Pattern models, or {}."""
+    try:
+        from app.gst.patterns import pattern_evaluations
+        return {**model.head_evaluations(), **pattern_evaluations()}
+    except Exception:  # noqa: BLE001 — GST is optional; never break the caller
+        logger.exception("GST head evaluations unavailable")
+        return {}
+
+
+def evaluation_rows() -> dict:
+    """Rows for the Model Evaluation summary panel — GST heads + the Fraud/
+    Anomaly Pattern models, lazily backfilling per-fold CV / training a
+    pattern model that hasn't run yet this process lifetime. Returns
+    {"models": [...], "algorithm": str | None, "trainedAt": str | None}."""
+    from app.gst.patterns import pattern_evaluations, train_pattern_models
+
+    evals = head_evaluations()
+    if not evals:
+        try:
+            if model.is_trained():
+                evals = model.reevaluate()
+        except Exception:  # noqa: BLE001
+            logger.exception("GST eval backfill failed")
+
+    try:
+        pat = pattern_evaluations()
+        if not pat and (evals or model.is_trained()):
+            pat = train_pattern_models()
+        evals = {**evals, **pat}
+    except Exception:  # noqa: BLE001
+        logger.exception("GST pattern evaluations unavailable")
+
+    rows = []
+    for hid, ev in evals.items():
+        em = ev.get("evalMetrics", {})
+        meta = em.get("metricMeta", {})
+        rows.append({
+            "modelId": hid,
+            "name": ev.get("name", hid),
+            "kind": "pattern" if hid.startswith("gst_pattern_") else "gst",
+            "metricLabel": meta.get("r2Score", {}).get("name", "Score"),
+            "metricValue": em.get("r2Score"),
+            "precision": em.get("precision"),
+            "recall": em.get("recall"),
+            "f1": em.get("f1Score"),
+            "folds": len(ev.get("cvFolds", [])),
+        })
+
+    ctx = {}
+    if rows:
+        try:
+            ctx = model.eval_context()
+        except Exception:  # noqa: BLE001
+            logger.exception("GST eval context unavailable")
+    return {"models": rows, "algorithm": ctx.get("algorithm"), "trainedAt": ctx.get("trainedAt")}
+
+
+def rerun(model_id: str) -> dict | None:
+    """Retrain/re-CV one GST model id — a Fraud/Anomaly Pattern model or a
+    head. Returns {"evalMetrics", "cvFolds"}, or None if `model_id` doesn't
+    belong to GST at all. Raises ValueError if it IS a GST id but nothing is
+    trained yet (route maps that to 400)."""
+    from app.gst.model import HEAD_IDS
+    from app.gst.patterns import PATTERN_MODEL_IDS, train_pattern_models
+
+    if model_id in PATTERN_MODEL_IDS:
+        pat = train_pattern_models()
+        entry = pat.get(model_id)
+        if not entry:
+            raise ValueError("Train the GST model first.")
+        return {"evalMetrics": entry["evalMetrics"], "cvFolds": entry["cvFolds"]}
+
+    if model_id in HEAD_IDS:
+        try:
+            evals = model.reevaluate()
+        except (ValueError, FileNotFoundError) as exc:
+            raise ValueError(str(exc)) from exc
+        gst = evals.get(model_id)
+        if not gst:
+            raise ValueError("Train the GST model first (GST data source).")
+        return {"evalMetrics": gst["evalMetrics"], "cvFolds": gst["cvFolds"]}
+
+    return None

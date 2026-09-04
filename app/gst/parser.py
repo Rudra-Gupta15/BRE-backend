@@ -9,6 +9,7 @@ import io
 import json
 import logging
 import re
+from typing import Callable
 
 from app.gst.schema import CANONICAL
 
@@ -186,6 +187,49 @@ def _parse_pdf_table(lines: list[str]) -> list[dict]:
     return [_row(dict(zip(header, values[k:k + n]))) for k in range(0, len(values) - n + 1, n)] if len(values) >= n else []
 
 
+# Alternate-schema flat summaries (a simplified per-customer export, not a
+# full GSTR-return dump) use different field names and coarser granularity
+# than CANONICAL. Left un-mapped, a row like {"annual_turnover": 8339975.91,
+# "unique_buyers": 92, ...} carries none of the model's actual feature names,
+# so predict() silently falls back to the TRAINING-SET MEAN for almost every
+# input — every business ends up with nearly the same score regardless of how
+# different its real numbers are. Each alternate field is derived into every
+# canonical field it can honestly stand in for (never overwriting a canonical
+# value the row already has for real), so genuine per-row variation actually
+# reaches the model.
+_ALT_DERIVATIONS: list[tuple[str, str, Callable[[float], float]]] = [
+    ("annual_turnover", "annualised_gst_turnover", lambda v: v),
+    ("annual_turnover", "total_taxable_turnover", lambda v: v / 12.0),
+    ("annual_turnover", "monthly_turnover", lambda v: v / 12.0),
+    ("annual_turnover", "quarterly_turnover", lambda v: v / 4.0),
+    ("turnover_growth_pct", "turnover_growth_yoy", lambda v: v),
+    ("turnover_growth_pct", "turnover_decline_percentage", lambda v: max(0.0, -v)),
+    ("unique_buyers", "unique_buyer_count", lambda v: v),
+    ("return_delay_count", "late_return_count", lambda v: v),
+    ("filing_months_last_12", "filing_regularity_percentage", lambda v: min(100.0, v / 12.0 * 100)),
+    ("filing_months_last_12", "missed_return_count", lambda v: max(0.0, 12 - v)),
+]
+
+
+def _apply_alt_derivations(rows: list[dict]) -> list[dict]:
+    out = []
+    for r in rows:
+        r = dict(r)
+        for alt, canon, transform in _ALT_DERIVATIONS:
+            if canon in r and str(r[canon]).strip() not in ("", "nan", "NA"):
+                continue  # a real canonical value is already present — don't override it
+            raw = r.get(alt)
+            if raw in (None, "") or str(raw).strip() in ("", "nan", "NA"):
+                continue
+            try:
+                v = float(str(raw).replace(",", "").replace("%", "").strip())
+            except (TypeError, ValueError):
+                continue
+            r[canon] = round(transform(v), 4)
+        out.append(r)
+    return out
+
+
 def parse_gst(buf: bytes, file_name: str) -> list[dict]:
     """Never raises — returns [] when nothing parses."""
     ext = (file_name.rsplit(".", 1)[-1] if "." in file_name else "").lower()
@@ -194,20 +238,21 @@ def parse_gst(buf: bytes, file_name: str) -> list[dict]:
             rows = _parse_delimited(buf.decode("utf-8", "ignore"))
             if not rows or not any(set(r) & CANONICAL for r in rows):
                 rows = _parse_kv_pdf_or_text([ln.strip() for ln in buf.decode("utf-8", "ignore").splitlines() if ln.strip()])
-            return rows
+            return _apply_alt_derivations(rows)
         if ext == "json":
-            return _parse_json(buf.decode("utf-8", "ignore"))
+            return _apply_alt_derivations(_parse_json(buf.decode("utf-8", "ignore")))
         if ext in ("xlsx", "xls"):
-            return _parse_xlsx(buf)
+            return _apply_alt_derivations(_parse_xlsx(buf))
         if ext in ("pdf",):
-            return _parse_pdf(buf)
+            return _apply_alt_derivations(_parse_pdf(buf))
         if ext in ("md", "html", "htm"):
-            return _parse_kv_pdf_or_text([ln.strip() for ln in re.sub(r"[|*#>`\-]{1,}", " ", buf.decode("utf-8", "ignore")).splitlines() if ln.strip()]) \
+            rows = _parse_kv_pdf_or_text([ln.strip() for ln in re.sub(r"[|*#>`\-]{1,}", " ", buf.decode("utf-8", "ignore")).splitlines() if ln.strip()]) \
                 or _parse_delimited(buf.decode("utf-8", "ignore"))
+            return _apply_alt_derivations(rows)
         head = buf[:64].lstrip()
         if head[:1] in (b"[", b"{"):
-            return _parse_json(buf.decode("utf-8", "ignore"))
-        return _parse_delimited(buf.decode("utf-8", "ignore"))
+            return _apply_alt_derivations(_parse_json(buf.decode("utf-8", "ignore")))
+        return _apply_alt_derivations(_parse_delimited(buf.decode("utf-8", "ignore")))
     except Exception as exc:  # noqa: BLE001 — a bad file must never 500 the upload
         logger.warning("GST parse failed for %s: %s", file_name, exc)
         return []

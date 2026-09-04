@@ -6,7 +6,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from app.aa.product_rules import PRODUCT_NAMES, PRODUCT_RULE_IDS, product_catalogue
-from app.common.source_rules import rules_for
+from app.common.source_rules import DATA_SOURCE_RULES
 from app.common.rule_text import PRODUCT_DESCRIPTIONS, describe_rule
 from app.aa.product_engine import evaluate_product_rules
 from app.aa.scoring import (
@@ -16,6 +16,8 @@ from app.aa.scoring import (
 )
 from app.aa.product_state import bre_product_state
 from app.aa.product_source_state import product_source_rule_state
+from app.common.state.rule_catalog import rule_catalog_state
+from app.common.state.source_rules import data_source_rule_state
 from app.common.state.session import session_state
 
 router = APIRouter(prefix="/bre-products", tags=["bre-products"])
@@ -117,8 +119,8 @@ async def get_product_source_rules(product_id: str, source_id: str):
         "productId": product_id,
         "sourceId": source_id,
         "rules": [
-            {**r, "description": describe_rule(r["label"])}
-            for r in rules_for(source_id)
+            {**r, "description": r["description"] or describe_rule(r["label"])}
+            for r in rule_catalog_state.rules_for(source_id)
         ],
         "enabled": product_source_rule_state.for_ps(product_id, source_id),
     }
@@ -137,6 +139,62 @@ async def set_product_source_rules(product_id: str, source_id: str, body: RulesB
     return {
         "productId": product_id,
         "sourceId": source_id,
+        "enabled": product_source_rule_state.for_ps(product_id, source_id),
+    }
+
+
+class RuleEditBody(BaseModel):
+    label: str | None = None
+    threshold: str | None = None
+    description: str | None = None
+
+
+@router.put("/{product_id}/sources/{source_id}/rules/{rule_id}")
+async def edit_source_rule(product_id: str, source_id: str, rule_id: str, body: RuleEditBody):
+    """Rename a rule, change its threshold, or edit its explanation."""
+    if product_id not in PRODUCT_RULE_IDS:
+        raise HTTPException(404, f"Unknown product '{product_id}'.")
+    label = body.label.strip() if body.label is not None else None
+    if label == "":
+        raise HTTPException(422, "Rule name can't be empty.")
+    ok = rule_catalog_state.edit_rule(
+        source_id, rule_id,
+        label=label,
+        threshold=body.threshold.strip() if body.threshold is not None else None,
+        description=body.description.strip() if body.description is not None else None,
+    )
+    if not ok:
+        raise HTTPException(404, f"Unknown rule '{rule_id}' for source '{source_id}'.")
+    rule = next((r for r in rule_catalog_state.rules_for(source_id) if r["id"] == rule_id), None)
+    return {"rule": {**rule, "description": rule["description"] or describe_rule(rule["label"])}}
+
+
+class RuleCreateBody(BaseModel):
+    label: str
+    threshold: str = ""
+    description: str = ""
+
+
+@router.post("/{product_id}/sources/{source_id}/rules")
+async def add_source_rule(product_id: str, source_id: str, body: RuleCreateBody):
+    """Add a brand-new custom signal/rule to this data source's catalogue."""
+    if product_id not in PRODUCT_RULE_IDS:
+        raise HTTPException(404, f"Unknown product '{product_id}'.")
+    if source_id not in DATA_SOURCE_RULES:
+        raise HTTPException(404, f"Unknown data source '{source_id}'.")
+    label = body.label.strip()
+    if not label:
+        raise HTTPException(422, "Rule name is required.")
+    rule = rule_catalog_state.add_rule(source_id, label, body.threshold.strip(), body.description.strip())
+    product_source_rule_state.register_rule(source_id, rule["id"], True)
+    data_source_rule_state.register_rule(source_id, rule["id"], True)
+    return {
+        "productId": product_id,
+        "sourceId": source_id,
+        "rules": [
+            {**r, "description": r["description"] or describe_rule(r["label"])}
+            for r in rule_catalog_state.rules_for(source_id)
+        ],
         "enabled": product_source_rule_state.for_ps(product_id, source_id),
     }
 

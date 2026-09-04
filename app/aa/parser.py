@@ -249,19 +249,38 @@ def _llm_vision_extraction(doc) -> dict:
 
         for tx in page_data.get("transactions") or []:
             try:
-                amount = float(tx.get("amount") or 0)
-                if amount <= 0:
-                    continue
-                tx_type = str(tx.get("type") or "CREDIT").upper()
-                if tx_type not in ("DEBIT", "CREDIT"):
-                    tx_type = "CREDIT"
+                try:
+                    amount = float(tx.get("amount")) if tx.get("amount") not in (None, "") else None
+                except (TypeError, ValueError):
+                    amount = None
+                if amount is not None and amount <= 0:
+                    amount = None
                 try:
                     balance = float(tx["balance"]) if tx.get("balance") is not None else None
                 except (TypeError, ValueError):
                     balance = None
+                date_val = str(tx.get("date") or "")
+                narr_val = str(tx.get("narration") or "")[:200]
+
+                if amount is None:
+                    # The vision model didn't return a usable amount for this
+                    # row — pass it through (if it at least has a date or
+                    # narration) instead of silently dropping it, so the
+                    # pipeline's AI recovery pass gets a real shot at it.
+                    if not (date_val or narr_val):
+                        continue
+                    all_transactions.append({
+                        "date": date_val, "narration": narr_val or "Transaction",
+                        "type": None, "amount": None, "balance": balance,
+                    })
+                    continue
+
+                tx_type = str(tx.get("type") or "CREDIT").upper()
+                if tx_type not in ("DEBIT", "CREDIT"):
+                    tx_type = "CREDIT"
                 all_transactions.append({
-                    "date":      str(tx.get("date") or ""),
-                    "narration": str(tx.get("narration") or "Transaction")[:200],
+                    "date":      date_val,
+                    "narration": narr_val or "Transaction",
                     "type":      tx_type,
                     "amount":    round(amount, 2),
                     "balance":   balance,
@@ -457,12 +476,27 @@ def _parse_csv_statement(text: str) -> dict:
                 tx_type, value = ("DEBIT" if is_debit else "CREDIT"), abs(amount)
             else:
                 tx_type, value = ("DEBIT" if amount < 0 else "CREDIT"), abs(amount)
+
+        date_val = cells[date_idx] if 0 <= date_idx < len(cells) else None
+        narr_val = cells[narration_idx] if 0 <= narration_idx < len(cells) else None
         if value is None:
+            # No debit/credit/amount column gave us a usable number. Don't
+            # silently drop it here — a row that at least looks like a real
+            # transaction (has a date or narration) is passed through with
+            # amount=None so the pipeline's AI recovery pass gets a real shot
+            # at reconstructing it from the balance delta or the narration
+            # text; only genuinely blank/junk lines are skipped outright.
+            if not (date_val or narr_val):
+                continue
+            transactions.append({
+                "date": date_val, "narration": narr_val or line[:120],
+                "type": None, "amount": None, "balance": balance,
+            })
             continue
 
         transactions.append({
-            "date":      cells[date_idx]      if 0 <= date_idx < len(cells)      else None,
-            "narration": cells[narration_idx] if 0 <= narration_idx < len(cells) else line[:120],
+            "date":      date_val,
+            "narration": narr_val if narr_val else line[:120],
             "type":      tx_type,
             "amount":    value,
             "balance":   balance,

@@ -305,6 +305,25 @@ RULE_DESCRIPTIONS: dict[str, str] = {
     "Insurance Validation Rule": "Requires valid comprehensive insurance on the vehicle.",
     "Registration/RC Validation Rule": "Checks the vehicle registration certificate details.",
     "Vehicle Cost Validation Rule": "Verifies the on-road cost against the quotation.",
+
+    # BBPS Utility Payment History — mined from the bank statement's own
+    # utility-bill line items, not a separate feed (see app.bbps.analysis).
+    "BBPS Data Presence Rule": "Confirms at least one BBPS/utility bill payment was found in the statement.",
+    "Utility Account Count Rule": "Counts how many distinct utility accounts (electricity, water, gas...) are billed in this statement.",
+    "Utility Type Diversity Rule": "Flags an applicant paying 2+ different utility types as a stronger residency/stability signal.",
+    "Electricity Bill Payment Rule": "Checks for a recurring electricity bill payment.",
+    "Water Bill Payment Rule": "Checks for a recurring water bill payment.",
+    "Gas Bill Payment Rule": "Checks for a recurring gas bill payment.",
+    "Broadband Bill Payment Rule": "Checks for a recurring broadband/internet bill payment.",
+    "Mobile / DTH Bill Payment Rule": "Checks for a recurring mobile or DTH bill payment.",
+    "Recurring Utility Payment Rule": "Flags whether any utility bill repeats across 2+ calendar months (vs. a one-off payment).",
+    "Utility Bill Punctuality Rule": "Scores 0-100 from the on-time payment ratio, penalised for missed months.",
+    "Missed Utility Payment Rule": "Counts calendar months a recurring bill should have been paid but wasn't, based on the statement's own span.",
+    "On-Time Payment Ratio Rule": "Months a recurring utility was actually paid ÷ months it was expected to be paid.",
+    "Average Bill Amount Consistency Rule": "Checks each utility type's bill amount stays roughly consistent month to month.",
+    "Statement Span Sufficiency Rule": "Requires enough calendar months in the statement to judge payment regularity at all.",
+    "Utility Payment Frequency Rule": "Total BBPS/utility payments found across the statement period.",
+    "Final BBPS Underwriting Signal Rule": "Rolls up punctuality, diversity and missed payments into the BBPS utility-stability signal.",
 }
 
 

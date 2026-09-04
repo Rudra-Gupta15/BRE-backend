@@ -1,7 +1,13 @@
-"""/models routes — session training (4 bank models), the population/dataset
-model + its versioned registry, deployment toggles, and cross-validation
-evaluation. GST model ids delegate to app.gst.model.
-"""
+"""/models routes — AA (bank-statement) session training only: the 4 risk
+models, the population/dataset model + its versioned registry, deployment
+toggles, and cross-validation evaluation.
+
+GST has its OWN complete set of these endpoints under app.gst.router
+(/api/gst/train, /api/gst/evaluation, /api/gst/evaluation/summary,
+/api/gst/evaluation/{id}/re-run). BBPS has its own under app.bbps.router,
+same shape. This file imports nothing from app.gst or app.bbps — the Model
+Hub frontend calls each domain's endpoints directly and merges results
+client-side (see Page2Pipeline.jsx's loadEvalSummary / startTraining)."""
 
 import asyncio
 import logging
@@ -53,70 +59,19 @@ async def list_algorithms():
 class TrainBody(BaseModel):
     algorithm: str = "gradient_boosting"
     datasetFile: str = "processed_features_vector.csv"
-    sourceId: str | None = None   # scope training to one data source
-
-
-def _gst_model_cards(g: dict) -> list[dict]:
-    """One card per trained GST head (4 models)."""
-    created = datetime.now().strftime("%Y-%m-%d %H:%M")
-    algo_label = next(
-        (a["label"] for a in ML_ALGORITHMS if a["value"] == g.get("algorithm")),
-        "Gradient Boosting",
-    )
-    cards = []
-    for h in g.get("models", []):
-        cards.append({
-            "id": h["id"],
-            "name": h["name"],
-            "desc": h["desc"],
-            "accuracy": h["accuracyLabel"],
-            "algorithm": algo_label,
-            "createdDate": created,
-            "cvFolds": 3,
-            "sampleCount": g["nSamples"],
-            "features": h["nFeatures"],
-            "realData": True,
-            "kind": "gst",
-            "metrics": h["metrics"],
-            "metricLine": h["metricLine"],
-            "target": h["target"],
-            "modelKind": h["kind"],
-            "version": g["version"],
-            "classes": h.get("classes"),
-        })
-    return cards
 
 
 @router.post("/train")
 async def train_models_handler(body: TrainBody):
+    """Train the 4 bank-statement models on every uploaded AA statement.
+    GST/BBPS training happens on their own /gst/train and /bbps/train —
+    the frontend posts there directly for those sources, never here."""
     if not any(a["value"] == body.algorithm for a in ML_ALGORITHMS):
         raise HTTPException(400, f"Unknown algorithm '{body.algorithm}'.")
 
     loop = asyncio.get_event_loop()
     trained_at = datetime.now(timezone.utc).isoformat()
 
-    # ── GST source → train ONLY the GST model, return ONLY its card ────────
-    if body.sourceId == "gst_data":
-        from app.gst import model as gst_model
-        try:
-            g = await loop.run_in_executor(None, partial(gst_model.train, body.algorithm))
-        except (ValueError, FileNotFoundError, ImportError) as exc:
-            raise HTTPException(400, str(exc))
-        cards = _gst_model_cards(g)
-        models_state.trained_models = cards
-        try:
-            from app.gst import patterns as gst_patterns
-            await loop.run_in_executor(None, gst_patterns.save_training_baseline)
-        except Exception:  # noqa: BLE001
-            logger.warning("GST pattern-baseline save failed", exc_info=True)
-        return {
-            "models": cards, "algorithm": body.algorithm, "trainedAt": trained_at,
-            "realFeatures": None, "gstFeatureSummary": g.get("featureSummary"),
-            "gstRegistry": gst_model.registry_view(),
-            "txCount": g["nSamples"],
-        }
-
-    # ── bank-statement sources → the 4 risk models ────────────────────────
     result = await loop.run_in_executor(
         None,
         partial(train_models_live, body.algorithm, dict(session_state.parsed_statements)),
@@ -269,49 +224,25 @@ async def train_from_dataset(
     return {"ingest": ingest, "batchId": batch_id, **result}
 
 
-def _gst_head_evaluations() -> dict:
-    """{head_id: {evalMetrics, cvFolds, name}} for the active GST bundle + the
-    GST Fraud/Anomaly Pattern models, or {}."""
-    try:
-        from app.gst import model as gst_model
-        from app.gst.patterns import pattern_evaluations
-        return {**gst_model.head_evaluations(), **pattern_evaluations()}
-    except Exception:  # noqa: BLE001 — GST is optional; never break bank eval
-        logger.exception("GST head evaluations unavailable")
-        return {}
-
-
 @router.get("/evaluation")
 async def get_evaluation(model_id: str = "risk_model"):
-    """Real cross-validation results for the models trained on the Model Hub
-    page (bank models: 5-fold, cached on models_state; GST heads: 3-fold, read
-    from the GST registry)."""
+    """Real cross-validation results for the bank models trained on the
+    Model Hub page (5-fold, cached on models_state). GST/BBPS have their own
+    /gst/evaluation and /bbps/evaluation."""
     cache = models_state.evaluation_cache or {}
-    ev = cache.get(model_id)
-    trained_at = (models_state.last_training_run or {}).get("trainedAt")
-
-    if ev is None:
-        gst = _gst_head_evaluations().get(model_id)
-        if gst:
-            ev = {"evalMetrics": gst["evalMetrics"], "cvFolds": gst["cvFolds"]}
-            try:
-                from app.gst import model as gst_model
-                trained_at = gst_model.eval_context().get("trainedAt") or trained_at
-            except Exception:  # noqa: BLE001
-                pass
-
     return {
         "modelId": model_id,
-        "evaluation": ev,
-        "available": list(cache.keys()) + list(_gst_head_evaluations().keys()),
-        "trainedAt": trained_at,
+        "evaluation": cache.get(model_id),
+        "available": list(cache.keys()),
+        "trainedAt": (models_state.last_training_run or {}).get("trainedAt"),
     }
 
 
 @router.get("/evaluation/summary")
 async def evaluation_summary():
-    """One-glance accuracy of every model — the real CV headline metric for each
-    session model, plus the active population (dataset) model."""
+    """One-glance accuracy of the bank models trained on the Model Hub page,
+    plus the active population (dataset) model. GST/BBPS have their own
+    /gst/evaluation/summary and /bbps/evaluation/summary."""
     cache = models_state.evaluation_cache or {}
     run = models_state.last_training_run or {}
 
@@ -352,70 +283,19 @@ async def evaluation_summary():
             "trainedAt": active.get("trainedAt"),
         }
 
-    # ── GST heads — same shape as a session-model row, own CV (3-fold) ────────
-    # Bundles trained before the panel existed carry no per-fold metrics; the
-    # first summary call after that backfills them once (in a worker thread).
-    gst_evals = _gst_head_evaluations()
-    if not gst_evals:
-        try:
-            from app.gst import model as gst_model
-            if gst_model.is_trained():
-                loop = asyncio.get_event_loop()
-                gst_evals = await loop.run_in_executor(None, gst_model.reevaluate)
-        except Exception:  # noqa: BLE001
-            logger.exception("GST eval backfill failed")
-
-    # GST Fraud/Anomaly Pattern models. In-memory only, so a backend reload
-    # clears them — retrain lazily here (like the head backfill above) whenever
-    # a GST model exists but the pattern evals are missing.
-    try:
-        from app.gst import model as gst_model
-        from app.gst.patterns import pattern_evaluations, train_pattern_models
-        pattern_evals = pattern_evaluations()
-        if not pattern_evals and (gst_evals or gst_model.is_trained()):
-            loop = asyncio.get_event_loop()
-            pattern_evals = await loop.run_in_executor(None, train_pattern_models)
-        gst_evals = {**gst_evals, **pattern_evals}
-    except Exception:  # noqa: BLE001
-        logger.exception("GST pattern evaluations unavailable")
-
-    gst_models = []
-    gst_ctx = {}
-    for hid, ev in gst_evals.items():
-        em = ev.get("evalMetrics", {})
-        meta = em.get("metricMeta", {})
-        gst_models.append({
-            "modelId": hid,
-            "name": ev.get("name", hid),
-            "kind": "pattern" if hid.startswith("gst_pattern_") else "gst",
-            "metricLabel": meta.get("r2Score", {}).get("name", "Score"),
-            "metricValue": em.get("r2Score"),
-            "precision": em.get("precision"),
-            "recall": em.get("recall"),
-            "f1": em.get("f1Score"),
-            "folds": len(ev.get("cvFolds", [])),
-        })
-    if gst_models:
-        try:
-            from app.gst import model as gst_model
-            gst_ctx = gst_model.eval_context()
-        except Exception:  # noqa: BLE001
-            logger.exception("GST eval context unavailable")
-
     return {
         "sessionModels": session_models,
         "sessionAlgorithm": run.get("algorithm"),
         "sessionTrainedAt": run.get("trainedAt"),
         "sessionTxCount": run.get("txCount"),
         "datasetModel": dataset_model,
-        "gstModels": gst_models,
-        "gstAlgorithm": gst_ctx.get("algorithm"),
-        "gstTrainedAt": gst_ctx.get("trainedAt"),
     }
 
 
 @router.post("/evaluation/{model_id}/re-run")
 async def rerun_evaluation(model_id: str):
+    """Retrain/re-CV one bank / AA-pattern model id. GST/BBPS have their own
+    /gst/evaluation/{id}/re-run and /bbps/evaluation/{id}/re-run."""
     # ── Fraud / Anomaly Pattern model → retrain + re-CV ──────────────────────
     from app.aa.patterns import PATTERN_MODEL_IDS, train_pattern_models
 
@@ -431,38 +311,6 @@ async def rerun_evaluation(model_id: str):
         }
         return {"modelId": model_id,
                 "evaluation": {"evalMetrics": entry["evalMetrics"], "cvFolds": entry["cvFolds"]}}
-
-    # ── GST Fraud/Anomaly Pattern model → retrain on the corpus ──────────────
-    from app.gst.patterns import PATTERN_MODEL_IDS as GST_PATTERN_IDS
-
-    if model_id in GST_PATTERN_IDS:
-        from app.gst import patterns as gst_patterns
-        loop = asyncio.get_event_loop()
-        pat = await loop.run_in_executor(None, gst_patterns.train_pattern_models)
-        entry = pat.get(model_id)
-        if not entry:
-            raise HTTPException(400, "Train the GST model first.")
-        return {"modelId": model_id,
-                "evaluation": {"evalMetrics": entry["evalMetrics"], "cvFolds": entry["cvFolds"]}}
-
-    # ── GST head → recompute on the active GST bundle (no new version) ────────
-    from app.gst.model import HEAD_IDS
-
-    if model_id in HEAD_IDS:
-        from app.gst import model as gst_model
-
-        loop = asyncio.get_event_loop()
-        try:
-            evals = await loop.run_in_executor(None, gst_model.reevaluate)
-        except (ValueError, FileNotFoundError) as exc:
-            raise HTTPException(400, str(exc))
-        gst = evals.get(model_id)
-        if not gst:
-            raise HTTPException(400, "Train the GST model first (GST data source).")
-        return {
-            "modelId": model_id,
-            "evaluation": {"evalMetrics": gst["evalMetrics"], "cvFolds": gst["cvFolds"]},
-        }
 
     if model_id not in known_model_ids():
         raise HTTPException(404, f"Unknown model '{model_id}'.")

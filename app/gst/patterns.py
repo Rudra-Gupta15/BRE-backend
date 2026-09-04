@@ -41,7 +41,8 @@ _LABELS = {k: lbl for k, (lbl, _) in _FRAUD_METRICS.items()}
 
 def _f(v, d: float = 0.0) -> float:
     try:
-        return float(str(v).replace(",", "").replace("₹", "").replace("%", "").strip())
+        f = float(str(v).replace(",", "").replace("₹", "").replace("%", "").strip())
+        return f if f == f else d  # str(nan) parses back to nan without raising — catch it here
     except (TypeError, ValueError):
         return d
 
@@ -357,6 +358,33 @@ def _pattern_model_score(m: dict) -> dict:
     return out
 
 
+def _zone_reason(reason_key: str, typ: list[dict], cmp: dict, fp: float, ap: float) -> dict:
+    """Which of the four concern signals actually drove the verdict, in plain
+    words — so the banner doesn't say "matches a known fraud pattern" when
+    what really fired was a pure statistical outlier, or vice versa."""
+    if reason_key == "typology":
+        matched = [t for t in typ if t["hard"] and t["verdict"] == "match"]
+        names = "; ".join(f"{t['name']} ({t['evidence']})" for t in matched) or "a known fraud typology"
+        return {"kind": "typology",
+                "line": f"Matched a specific, named fraud pattern: {names}."}
+    if reason_key == "fraud_model":
+        return {"kind": "fraud_model",
+                "line": f"The trained GST Fraud Pattern Model scored this business at "
+                        f"{fp * 100:.0f}% fraud probability, based on patterns learned from the training corpus "
+                        "(not a specific named typology match)."}
+    if reason_key in ("anomaly_model", "anomaly_metric"):
+        worst = (cmp.get("perMetric") or [{}])[0]
+        if worst.get("metric"):
+            return {"kind": "anomaly",
+                    "line": f"Statistically unusual, not a fraud-pattern match: {worst['label']} is "
+                            f"{worst['value']} for this account vs. {worst['baseline']} normally "
+                            f"(z={worst['z']}). Could be a legitimate but atypical business."}
+        return {"kind": "anomaly",
+                "line": f"Statistically unusual overall activity (anomaly probability {ap * 100:.0f}%), "
+                        "not a specific fraud-pattern match."}
+    return {"kind": "none", "line": "Nothing about this account stood out."}
+
+
 def test_patterns() -> dict:
     profs = _uploaded_profiles()
     if not profs:
@@ -373,10 +401,21 @@ def test_patterns() -> dict:
 
     fp = models.get("gst_pattern_fraud_model", {}).get("probability", 0.0)
     ap = models.get("gst_pattern_anomaly_model", {}).get("probability", 0.0)
-    score = max(min(100.0, cmp["worstZ"] / 3.5 * 60.0), fp * 100.0, ap * 75.0,
-                100.0 if "MATCH" in verdict else 0.0)
-    concern = int(round(score))
+
+    # The concern score used to be a bare max() of these four — now we track
+    # WHICH one wins, so the UI can explain the actual reason instead of
+    # always showing the same "known fraud pattern" copy.
+    candidates = {
+        "typology": 100.0 if "MATCH" in verdict else 0.0,
+        "fraud_model": fp * 100.0,
+        "anomaly_model": ap * 75.0,
+        "anomaly_metric": min(100.0, cmp["worstZ"] / 3.5 * 60.0),
+    }
+    reason_key = max(candidates, key=candidates.get)
+    concern = int(round(candidates[reason_key]))
     zone = "concern" if concern >= 65 else "review" if concern >= 35 else "good"
+    zone_reason = _zone_reason(reason_key, typ, cmp, fp, ap) if zone != "good" else {
+        "kind": "none", "line": "Nothing about this account stood out."}
 
     return {
         "available": True,
@@ -386,6 +425,7 @@ def test_patterns() -> dict:
         "verdictNote": note,
         "concernScore": concern,
         "zone": zone,
+        "zoneReason": zone_reason,
         "boxes": _gst_boxes(typ, models, cmp["worstBand"]),
         "patternAnomalyScore": min(100.0, round(cmp["worstZ"] / 3.5 * 60.0, 1)),
         "modelScores": models,

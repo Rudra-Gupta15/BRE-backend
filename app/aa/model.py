@@ -119,12 +119,18 @@ def extract_features(parsed_statement: dict) -> dict:
             "irregular_gap_score":  0.5,
         }
 
-    amounts  = [t["amount"] for t in transactions]
+    # A row the parser couldn't fully read comes through with amount=None
+    # (guardrails passes missing data rather than rejecting the transaction)
+    # — filter those out before they hit sum()/np.median(), which both raise
+    # on a None mixed in with numbers.
+    amounts  = [t["amount"] for t in transactions if isinstance(t.get("amount"), (int, float))]
     balances = [t["balance"] for t in transactions
                 if isinstance(t.get("balance"), (int, float))]
 
-    debits  = [t["amount"] for t in transactions if t.get("type") == "DEBIT"]
-    credits = [t["amount"] for t in transactions if t.get("type") == "CREDIT"]
+    debits  = [t["amount"] for t in transactions
+               if t.get("type") == "DEBIT" and isinstance(t.get("amount"), (int, float))]
+    credits = [t["amount"] for t in transactions
+               if t.get("type") == "CREDIT" and isinstance(t.get("amount"), (int, float))]
 
     total_debit  = summary.get("totalDebit")  or sum(debits)  or 1.0
     total_credit = summary.get("totalCredit") or sum(credits) or 1.0

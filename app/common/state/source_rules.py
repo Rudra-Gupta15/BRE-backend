@@ -67,5 +67,12 @@ class DataSourceRuleState:
             self.enabled[source_id] = {r["id"]: True for r in DATA_SOURCE_RULES[source_id]}
             self.persist()
 
+    def register_rule(self, source_id: str, rule_id: str, default: bool = True) -> None:
+        """Add a freshly-created custom rule to this source's enabled map."""
+        m = self.enabled.setdefault(source_id, {})
+        if rule_id not in m:
+            m[rule_id] = default
+            self.persist()
+
 
 data_source_rule_state = DataSourceRuleState()

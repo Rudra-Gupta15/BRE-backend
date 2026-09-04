@@ -121,5 +121,16 @@ class ProductSourceRuleState:
             }
             self.persist()
 
+    def register_rule(self, source_id: str, rule_id: str, default: bool = True) -> None:
+        """Add a freshly-created custom rule to every product's enabled map for this source."""
+        changed = False
+        for pid in self.enabled:
+            m = self.enabled[pid].setdefault(source_id, {})
+            if rule_id not in m:
+                m[rule_id] = default
+                changed = True
+        if changed:
+            self.persist()
+
 
 product_source_rule_state = ProductSourceRuleState()

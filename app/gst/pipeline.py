@@ -24,6 +24,25 @@ def run_gst_pipeline() -> dict:
     if not gst_stmts:
         raise NoGstData("Upload GST return / summary files first.")
 
+    # Real noise/cleanliness from the actual uploaded file(s) — this used to be
+    # hardcoded to 0/False regardless of what was uploaded, so the "AI Noise
+    # Inspection" box always claimed a perfectly clean file even when it wasn't.
+    # Worst file wins, not the average — one dirty file in a folder of clean
+    # ones must still trip the threshold, not get diluted away.
+    file_metas = session_state.files_for("gst_data")
+    scored = [f for f in file_metas if isinstance(f.get("cleanlinessPercent"), (int, float))]
+    worst = min(scored, key=lambda f: f["cleanlinessPercent"]) if scored else None
+    cleanliness = worst["cleanlinessPercent"] if worst else 100
+    noise_percent = min(95, max(1, round(100 - cleanliness)))
+    llm_active = noise_percent > 40
+    noise_by_source = {
+        "gst_data": {
+            "label": "GST Transaction Data", "cleanlinessPercent": round(cleanliness),
+            "worstFileName": worst.get("fileName") if worst else None,
+            "noisePercent": noise_percent, "llmActive": llm_active, "fileCount": len(file_metas),
+        }
+    }
+
     blocks = [s["gst"] for s in gst_stmts]
     scores = [b["avgUnderwritingScore"] for b in blocks if b.get("avgUnderwritingScore") is not None]
     risk: dict = {}
@@ -54,11 +73,20 @@ def run_gst_pipeline() -> dict:
         "normScore": f"{avg / 100:.3f}" if avg is not None else "—",
         "status": "GST scored",
     }
+    avg_completeness = round(sum((b.get("completeness") or 0) for b in blocks) / len(blocks)) if blocks else 0
+    normalise_detail = (
+        f"{cleanliness}% file cleanliness (byte-level scan of the upload) — "
+        + (f"noise {noise_percent}% exceeds the 40% threshold, AI cleaning pass activated."
+           if llm_active else
+           f"noise {noise_percent}% within threshold, ingested directly — no cleaning needed.")
+        + f" GSTR-field coverage {avg_completeness}% (how much of the full 53-field return schema this "
+          "source supplies — a schema-coverage measure, not a cleanliness score)."
+    )
     stages = [
         {"id": 1, "name": "1. Parse GST Files", "desc": "GSTR-1 / 3B / 2A / 2B or summary rows", "durationMs": 0,
          "detail": f"{sum(seen.values()) or businesses} row(s) across {len(gst_stmts)} file(s)."},
         {"id": 2, "name": "2. Normalise Fields", "desc": "Coerce numbers, strip currency/%",
-         "durationMs": 0, "detail": "All GST fields normalised."},
+         "durationMs": 0, "detail": normalise_detail},
         {"id": 3, "name": "3. Roll Up Per Business", "desc": "12-24 months → one profile per GSTIN",
          "durationMs": 0, "detail": f"{businesses} business profile(s)."},
         {"id": 4, "name": "4. Score", "desc": "GST Underwriting Model — score + risk flag",
@@ -67,7 +95,8 @@ def run_gst_pipeline() -> dict:
          "durationMs": 0, "detail": f"{len(ranking)} GST feature(s) ranked."},
     ]
     return {
-        "stages": stages, "noisePercent": 0, "llmActive": False,
+        "stages": stages, "noisePercent": noise_percent, "llmActive": llm_active,
+        "noiseBySource": noise_by_source,
         "processedTable": [processed_row], "storedFile": "gst_feature_profiles.csv",
         "selectedFeatures": [r["feature"] for r in ranking if r["selected"]],
         "normalizeTable": [], "engineeredTable": [], "selectionTable": selection_table,

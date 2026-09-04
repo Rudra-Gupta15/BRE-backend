@@ -105,16 +105,28 @@ def validate_llm_extraction(parsed: dict) -> tuple[dict, list[str]]:
     for t in txns:
         if not isinstance(t, dict):
             continue
-        amt = _to_float(t.get("amount"))
-        if amt is None or amt < 0 or amt > 1.0e9:
-            warnings.append(f"dropped transaction with implausible amount: {t.get('amount')!r}")
+        raw_amt = t.get("amount")
+        amt = _to_float(raw_amt)
+        if amt is not None and (amt < 0 or amt > 1.0e9):
+            # A genuinely implausible value (negative, or absurd) is still a
+            # real security concern — reject it, unchanged from before.
+            warnings.append(f"dropped transaction with implausible amount: {raw_amt!r}")
             continue
         narr = str(t.get("narration") or "")[:2000]
         # strip control chars that could be prompt-injection / log-forging
         narr = "".join(ch for ch in narr if ch >= " " or ch == "\t")
         ttype = str(t.get("type") or "").upper()
         if ttype not in ("DEBIT", "CREDIT"):
-            ttype = "DEBIT" if amt and amt < 0 else "CREDIT"
+            ttype = None if amt is None else ("DEBIT" if amt < 0 else "CREDIT")
+        if amt is None:
+            # No amount at all (parser gave up on this row) isn't implausible
+            # data, it's missing data — pass it through with amount=None so
+            # the pipeline's AI recovery pass gets a real shot at it, instead
+            # of this guardrail silently discarding what the parser already
+            # chose to keep.
+            row = {**t, "narration": narr, "amount": None, "type": ttype or None}
+            clean.append(row)
+            continue
         row = {**t, "narration": narr, "amount": abs(amt), "type": ttype}
         clean.append(row)
         if ttype == "CREDIT":

@@ -40,11 +40,15 @@ class SelectionBody(BaseModel):
 
 @router.put("/selection")
 async def set_selection(body: SelectionBody):
+    """Which sources the user is currently working with — purely a session
+    working-set. Deliberately does NOT touch publish status: publish/unpublish/
+    draft is only ever set from the Model Hub footer (PUT /status below), and
+    stays whatever it was last set to until that happens again, regardless of
+    what gets selected or deselected here."""
     valid_ids = {s["id"] for s in session_state.all_data_sources()}
     ids = [i for i in body.selectedIds if i in valid_ids]
     session_state.selected_ids = ids
     session_state.persist()
-    published_state.set_published_ids(ids)
     return {"selectedIds": ids}
 
 

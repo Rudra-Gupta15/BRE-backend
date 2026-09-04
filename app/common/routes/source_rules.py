@@ -5,8 +5,8 @@ enable/disable state (the "Data Source Signals" popup on each source card).
 from fastapi import APIRouter
 from pydantic import BaseModel
 
-from app.common.source_rules import rules_for
 from app.common.rule_text import describe_rule
+from app.common.state.rule_catalog import rule_catalog_state
 from app.common.state.source_rules import data_source_rule_state
 
 router = APIRouter(prefix="/data-source-rules", tags=["data-source-rules"])
@@ -16,7 +16,10 @@ router = APIRouter(prefix="/data-source-rules", tags=["data-source-rules"])
 async def get_rules(source_id: str):
     """The rule catalogue + enabled state for one data source. Unknown / rule-less
     sources return an empty list (the popup shows its empty state)."""
-    rules = [{**r, "description": describe_rule(r["label"])} for r in rules_for(source_id)]
+    rules = [
+        {**r, "description": r["description"] or describe_rule(r["label"])}
+        for r in rule_catalog_state.rules_for(source_id)
+    ]
     return {
         "id": source_id,
         "rules": rules,

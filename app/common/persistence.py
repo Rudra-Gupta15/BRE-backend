@@ -39,7 +39,8 @@ logger = logging.getLogger(__name__)
 def _f(x):
     """Coerce to float or None (Numeric columns reject stray strings/NaN)."""
     try:
-        return float(x) if x is not None else None
+        f = float(x) if x is not None else None
+        return f if f is None or f == f else None  # drop NaN — a float(nan) doesn't raise
     except (TypeError, ValueError):
         return None
 
@@ -362,6 +363,58 @@ def record_gst_test_history(result: dict, source_id: str | None, file_name: str 
         session.close()
 
 
+def record_bbps_test_history(result: dict, source_id: str | None, file_name: str | None,
+                             custom_id: str | None = None) -> None:
+    """One history row per BBPS upload — all 4 BBPS heads folded into it.
+    `result` is the /api/bbps/score-testing payload; stored so the row can
+    reopen. Twin of record_gst_test_history."""
+    if not db.DB_ENABLED:
+        return
+    session = get_session()
+    if session is None:
+        return
+    try:
+        analysis = result.get("analysis") or {}
+        prediction = result.get("prediction") or {}
+        heads = prediction.get("headScores") or {}
+        label = (custom_id or "").strip() or (file_name.rsplit(".", 1)[0] if file_name else None) \
+            or "applicant"
+        key = f"ref:{custom_id.strip().lower()}" if (custom_id or "").strip() not in ("", "applicant") \
+            else f"file:{(file_name or 'bbps').rsplit('.', 1)[0].lower()}"
+        fields = dict(
+            applicant_name=label,
+            bank_name=None,
+            model_id="bbps_models",
+            model_name="BBPS Models (4)",
+            model_version=f"v{result.get('modelVersion')}" if result.get("modelVersion") else None,
+            data_source="BBPS_UTILITY",
+            credit_score=prediction.get("stabilityScore"),
+            risk_grade=prediction.get("riskFlag"),
+            decision=None,
+            transaction_count=analysis.get("paymentsLast12m") or 0,
+            source_id=source_id,
+            custom_id=custom_id,
+            file_name=file_name,
+            result_bundle={"_kind": "bbps", **result},
+            tested_at=_now(),
+        )
+        existing = session.scalar(select(TestHistory).where(
+            TestHistory.applicant_key == key, TestHistory.model_id == "bbps_models",
+        ))
+        if existing is not None:
+            for k, v in fields.items():
+                setattr(existing, k, v)
+        else:
+            session.add(TestHistory(applicant_key=key, first_tested_at=_now(), **fields))
+        session.commit()
+        _ = heads
+    except Exception:  # noqa: BLE001
+        session.rollback()
+        logger.exception("record_bbps_test_history failed")
+    finally:
+        session.close()
+
+
 def list_test_history(limit: int = 1000) -> list[dict]:
     """ONE row per tested application (not per model), newest first. Every model
     run against the same upload is merged into the row's `models` list. Empty
@@ -383,10 +436,18 @@ def list_test_history(limit: int = 1000) -> list[dict]:
             m = {"modelId": r.model_id, "model": r.model_name or r.model_id or "—",
                  "version": r.model_version, "score": r.credit_score,
                  "grade": r.risk_grade, "decision": r.decision}
-            # a GST row already covers all 4 heads — expand them for the chips
+            # a GST / BBPS row already covers all 4 heads — expand them for the chips
             gst_models = None
             if r.model_id == "gst_models" and isinstance(r.result_bundle, dict):
                 hs = r.result_bundle.get("headSummary") or {}
+                gst_models = [
+                    {"modelId": hid, "model": h.get("name", hid),
+                     "version": r.model_version,
+                     "score": h.get("value"), "grade": h.get("label"), "decision": None}
+                    for hid, h in hs.items()
+                ] or None
+            elif r.model_id == "bbps_models" and isinstance(r.result_bundle, dict):
+                hs = ((r.result_bundle.get("prediction") or {}).get("headScores")) or {}
                 gst_models = [
                     {"modelId": hid, "model": h.get("name", hid),
                      "version": r.model_version,

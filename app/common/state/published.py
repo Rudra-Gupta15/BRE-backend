@@ -1,6 +1,10 @@
 # Per-data-source publish status: 'published' | 'unpublished' | 'draft'.
-# Survives /reset and a project restart. 'published' sources are the ones fed to
-# the Model Hub pipeline (session_state.selected_ids is derived from them).
+# Survives /reset and a project restart. Only ever changed from the Model Hub
+# footer (Published / Unpublished / Draft) via set_status()/set_many() —
+# selecting or deselecting a source on the Data Sources page never touches
+# this, so a status sticks until someone deliberately changes it there.
+# GET /data-sources/selection reads published_ids as the default working set
+# on a fresh session, but nothing ever writes selection back into here.
 
 import json
 import logging
@@ -63,18 +67,6 @@ class PublishedState:
         for sid, status in mapping.items():
             if status in _VALID:
                 self.statuses[str(sid)] = status
-        self.persist()
-
-    def set_published_ids(self, ids: list[str]) -> None:
-        """Full-replace the published set (used by PUT /selection): given ids
-        become 'published'; any source that *was* published and isn't in the
-        list falls back to 'unpublished'. 'draft' sources are left alone."""
-        keep = set(ids)
-        for sid in list(self.statuses):
-            if self.statuses[sid] == "published" and sid not in keep:
-                self.statuses[sid] = "unpublished"
-        for sid in ids:
-            self.statuses[str(sid)] = "published"
         self.persist()
 
 
