@@ -8,8 +8,8 @@ model saw plus the 4 head predictions. Same result shape as
 from __future__ import annotations
 
 from app.common.source_rules import DATA_SOURCE_RULES
-from app.aa.product_state import bre_product_state
-from app.aa.product_source_state import product_source_rule_state
+from app.common.active_product import active_product_state
+from app.common.product_source_state import product_source_rule_state
 
 
 def _f(v, d: float = 0.0) -> float:
@@ -154,7 +154,7 @@ def _label_to_id() -> dict[str, str]:
 
 def evaluate(profile: dict, heads: dict, *, product_id: str | None = None) -> dict:
     """Run the computable gst_data rules against one scored business."""
-    product_id = product_id or bre_product_state.active_product
+    product_id = product_id or active_product_state.active_product
     enabled_map = product_source_rule_state.for_ps(product_id, "gst_data") if product_id else {}
     lid = _label_to_id()
 

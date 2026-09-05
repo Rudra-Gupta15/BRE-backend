@@ -25,7 +25,7 @@ from sklearn.ensemble import GradientBoostingClassifier
 from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score
 from sklearn.model_selection import StratifiedKFold
 
-from app.aa.scoring import _parse_tx_date
+from app.common.dates import parse_tx_date as _parse_tx_date
 from app.bbps.analysis import extract_bbps_transactions
 from app.common.security import pattern_baseline
 from app.common.state.session import session_state

@@ -11,11 +11,12 @@ import math
 import re
 import statistics
 from collections import Counter, OrderedDict
-from datetime import date, datetime
+from datetime import date
 
 from app.aa.templates import ANOMALY_REASONS, MODEL_ANALYTICS_META, MONTHS, TRANSACTION_TEMPLATES
 from app.aa.catalog import MODEL_TEMPLATES
 from app.aa.rule_catalog import CREDIT_SCORE_GATE_RULE_ID
+from app.common.dates import parse_tx_date as _parse_tx_date
 from app.common.rng import create_rng, pick, rand_int, rand_range
 from app.aa.settings_state import settings_state
 
@@ -361,45 +362,9 @@ def compute_real_credit_score(fv: dict, parsed: dict | None = None) -> dict:
 # ─────────────────────────────────────────────────────────────────────────────
 # Real-data helpers: everything below derives from the actual parsed statement
 # (no RNG). Used by generate_analytics / generate_anomalies when an uploaded
-# statement is available.
+# statement is available. _parse_tx_date itself now lives in app.common.dates
+# (imported above) since gst/bbps/upi all need the same real-world date parser.
 # ─────────────────────────────────────────────────────────────────────────────
-
-_MONTH_IDX = {m.lower(): i + 1 for i, m in enumerate(MONTHS)}
-_MONTH_IDX.update({
-    "january": 1, "february": 2, "march": 3, "april": 4, "may": 5, "june": 6,
-    "july": 7, "august": 8, "september": 9, "october": 10, "november": 11, "december": 12,
-    "sept": 9,
-})
-
-_DATE_FORMATS = (
-    "%d/%m/%Y", "%d/%m/%y", "%d-%m-%Y", "%d-%m-%y", "%Y-%m-%d", "%Y/%m/%d",
-    "%d.%m.%Y", "%d.%m.%y", "%d %b %Y", "%d %B %Y", "%d-%b-%Y", "%d-%b-%y",
-    "%b %d %Y", "%B %d %Y", "%d %b %y",
-)
-
-
-def _parse_tx_date(raw) -> date | None:
-    """Best-effort parse of the many date shapes real statements use.
-    Indian statements are day-first, so DD/MM is preferred over MM/DD."""
-    if not raw or not isinstance(raw, str):
-        return None
-    s = re.sub(r"\s+", " ", raw.strip().replace(",", " ")).strip()
-    for fmt in _DATE_FORMATS:
-        try:
-            return datetime.strptime(s, fmt).date()
-        except ValueError:
-            continue
-    m = re.match(r"(\d{1,2})[ /\-]([A-Za-z]{3,})[ /\-](\d{2,4})", s)
-    if m:
-        mon = _MONTH_IDX.get(m.group(2).lower())
-        if mon:
-            day, yr = int(m.group(1)), int(m.group(3))
-            yr += 2000 if yr < 100 else 0
-            try:
-                return date(yr, mon, min(day, 28))
-            except ValueError:
-                return None
-    return None
 
 
 def _days_in_month(y: int, m: int) -> int:

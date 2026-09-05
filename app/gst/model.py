@@ -863,8 +863,18 @@ def _predict_heads(record: dict, loaded: dict) -> dict:
             est = h["est"]
             if hasattr(est, "predict_proba") and classes:
                 p = est.predict_proba(xs)[0]
-                entry["label"] = classes[int(np.argmax(p))]
-                entry["proba"] = {classes[i]: round(float(p[i]), 4) for i in range(len(classes))}
+                # est.classes_ may be a STRICT SUBSET of `classes` — a weak-
+                # supervision band the training data never produced leaves
+                # the classifier never having seen it, so p has fewer
+                # columns than len(classes). Map by the model's own
+                # seen-class indices, zero-filling whatever it never saw.
+                seen = getattr(est, "classes_", range(len(p)))
+                proba = {classes[int(idx)]: round(float(pv), 4)
+                         for idx, pv in zip(seen, p) if int(idx) < len(classes)}
+                for c in classes:
+                    proba.setdefault(c, 0.0)
+                entry["proba"] = proba
+                entry["label"] = max(proba, key=proba.get)
             else:
                 pi = int(est.predict(xs)[0])
                 entry["label"] = classes[pi] if pi < len(classes) else str(pi)
@@ -909,8 +919,14 @@ def predict(record: dict) -> dict:
     proba = None
     if hasattr(art["classifier"], "predict_proba"):
         p = art["classifier"].predict_proba(xs)[0]
-        proba = {classes[i]: round(float(p[i]), 4) for i in range(len(classes))}
-        flag = classes[int(np.argmax(p))]
+        # est.classes_ may be a STRICT SUBSET of `classes` (see _predict_heads
+        # above for why) — map by the model's own seen-class indices.
+        seen = getattr(art["classifier"], "classes_", range(len(p)))
+        proba = {classes[int(idx)]: round(float(pv), 4)
+                 for idx, pv in zip(seen, p) if int(idx) < len(classes)}
+        for c in classes:
+            proba.setdefault(c, 0.0)
+        flag = max(proba, key=proba.get)
     else:
         flag = classes[int(art["classifier"].predict(xs)[0])]
 

@@ -5,6 +5,7 @@ Builds the app, wires CORS, and mounts every router under /api:
     app.aa.router        -> /pipeline, /models, /inference, /bre-products, /settings
     app.gst.api_router   -> /gst/*
     app.bbps.api_router  -> /bbps/*
+    app.upi.api_router   -> /upi/*
     app.common.routes.*  -> /auth, /reset, /health, /dashboard, /security,
                             /data-sources, /data-source-rules, /ai-architecture
 
@@ -32,6 +33,7 @@ from app.common.routes import (
 )
 from app.bbps import api_router as bbps_api_router
 from app.gst import api_router as gst_api_router
+from app.upi import api_router as upi_api_router
 
 
 @asynccontextmanager
@@ -77,6 +79,7 @@ app.include_router(sources.router, prefix="/api")
 app.include_router(aa_router, prefix="/api")
 app.include_router(gst_api_router, prefix="/api")
 app.include_router(bbps_api_router, prefix="/api")
+app.include_router(upi_api_router, prefix="/api")
 app.include_router(source_rules.router, prefix="/api")
 app.include_router(external_db.router, prefix="/api")
 app.include_router(ai.router, prefix="/api")

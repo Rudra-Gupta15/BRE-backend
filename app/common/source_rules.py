@@ -192,6 +192,27 @@ _RAW: dict[str, list[str]] = {
         "Utility Payment Frequency Rule",
         "Final BBPS Underwriting Signal Rule",
     ],
+    # Every one of these is grounded in a real field app.upi.analyze_upi()
+    # actually computes from the transaction log — no padding to match
+    # AA/GST's rule count for a source with a narrower, single-signal scope.
+    "upi_enrichment": [
+        "UPI Data Presence Rule",
+        "Transaction Volume Rule",
+        "Payment Success Rate Rule",
+        "Failed Transaction Rule",
+        "P2P Counterparty Diversity Rule",
+        "P2M Merchant Diversity Rule",
+        "Recurring Payee Rule",
+        "High-Risk MCC Exposure Rule",
+        "Weekend Spend Concentration Rule",
+        "Average Ticket Size Rule",
+        "P2P Lending Velocity Rule",
+        "P2P Borrowing Velocity Rule",
+        "Daily Transaction Consistency Rule",
+        "Statement Span Sufficiency Rule",
+        "Network Stability Rule",
+        "Final UPI Underwriting Signal Rule",
+    ],
 }
 
 

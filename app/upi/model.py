@@ -1,34 +1,33 @@
-"""BBPS Utility Payment History model — trains FOUR real Gradient-Boosting
-heads on app.bbps.schema.FEATURES (derived from analyze_bbps()'s real,
-computed per-statement signals), each 3-fold cross-validated on the same
-corpus:
+"""UPI Transaction Data Enrichment model — trains FOUR real Gradient-Boosting
+heads on app.upi.schema.FEATURES (derived from analyze_upi()'s real, computed
+per-applicant signals), each 3-fold cross-validated on the same corpus:
 
-  1. Utility Payment Risk Model     — classifier -> bbps_risk_flag (LOW/MEDIUM/HIGH)
-  2. Payment Discipline Score       — regressor  -> payment_discipline_score (0-100)
-  3. Bill Payment Behaviour Model   — classifier -> bill_payment_behaviour (REGULAR/IRREGULAR)
-  4. Utility Expense Stability Model — regressor -> utility_expense_stability_score (0-100)
+  1. UPI Transaction Risk Model     — classifier -> upi_transaction_risk_flag (LOW/MEDIUM/HIGH)
+  2. Payment Reliability Score      — regressor  -> upi_payment_reliability_score (0-100)
+  3. Spend Behaviour Model          — classifier -> upi_spend_behaviour (REGULAR/IRREGULAR)
+  4. Network Stability Score        — regressor  -> upi_network_stability_score (0-100)
 
-There's no ground-truth "did this applicant default" label for utility
-payment behaviour, so — same convention as app.aa.model's _build_labels and
-app.gst's bundled dataset — all four targets are WEAK SUPERVISION: documented,
-non-ML formulas over the real features. Each head deliberately weights a
-different subset of the same features (see _compute_targets) so it learns a
-distinct signal instead of four copies of one score:
-  - Risk blends punctuality + missed payments + diversity + recurring share
-    + tenure into one composite band.
-  - Discipline looks ONLY at on-time ratio and missed-payment count — pure
-    punctuality, nothing else.
-  - Behaviour looks at recurring share and payment cadence (payments vs.
-    expected months) — is this a subscription-like recurring payer or a
-    one-off/sporadic one — independent of whether payments were on time.
-  - Stability looks at account diversity and statement tenure — how
-    established the applicant's utility footprint is — independent of
-    punctuality.
+There's no ground-truth "did this applicant default" label for UPI spend
+behaviour, so — same convention as app.bbps.model / app.aa.model — all four
+targets are WEAK SUPERVISION: documented, non-ML formulas over the real
+features. Each head deliberately weights a different subset of the same
+features (see _compute_targets) so it learns a distinct signal instead of
+four copies of one score:
+  - Risk blends failed-transaction rate + high-risk MCC spend + thin payee
+    network + short statement tenure into one composite band.
+  - Reliability looks ONLY at the success/failed transaction ratio — pure
+    payment execution quality, nothing else.
+  - Behaviour looks at recurring-payee share and daily transaction cadence —
+    a subscription-like regular spender vs. a sporadic one — independent of
+    risk or reliability.
+  - Stability looks at payee/payer network diversity and statement tenure —
+    how established the applicant's UPI footprint is — independent of the
+    other three.
 
 Every real statement a user uploads gets appended to the corpus for real (its
 FEATURES are 100% real; only the labels are policy formulas, recomputed fresh
 from those features on every load — see _compute_targets), so all four models
-keep learning from genuine data over time, exactly like GST's corpus.csv.
+keep learning from genuine data over time, exactly like BBPS's corpus.csv.
 """
 
 from __future__ import annotations
@@ -54,11 +53,11 @@ from sklearn.metrics import (
 from sklearn.model_selection import KFold, StratifiedKFold
 from sklearn.preprocessing import StandardScaler
 
-from app.bbps.schema import (
+from app.upi.schema import (
     BEHAVIOUR_ORDER,
     BEHAVIOUR_TARGET,
-    DISCIPLINE_TARGET,
     FEATURES,
+    RELIABILITY_TARGET,
     RISK_ORDER,
     RISK_TARGET,
     STABILITY_TARGET,
@@ -69,7 +68,7 @@ from app.common.security import serialization
 logger = logging.getLogger(__name__)
 
 _PKG_DIR = Path(__file__).resolve().parent
-_MODEL_DIR = _PKG_DIR.parents[1] / "models" / "bbps"   # Backend/models/bbps
+_MODEL_DIR = _PKG_DIR.parents[1] / "models" / "upi"   # Backend/models/upi
 _CORPUS_CSV = _MODEL_DIR / "corpus.csv"
 _REGISTRY = _MODEL_DIR / "registry.json"
 _DEPLOY_JSON = _MODEL_DIR / "deploy.json"
@@ -77,37 +76,35 @@ _DEPLOY_JSON = _MODEL_DIR / "deploy.json"
 _cache: dict | None = None
 _N_FOLDS = 3
 
-RISK_MODEL_ID = "bbps_utility_payment_risk_model"
-DISCIPLINE_MODEL_ID = "bbps_payment_discipline_score_model"
-BEHAVIOUR_MODEL_ID = "bbps_bill_payment_behaviour_model"
-STABILITY_MODEL_ID = "bbps_utility_expense_stability_model"
+RISK_MODEL_ID = "upi_transaction_risk_model"
+RELIABILITY_MODEL_ID = "upi_payment_reliability_score_model"
+BEHAVIOUR_MODEL_ID = "upi_spend_behaviour_model"
+STABILITY_MODEL_ID = "upi_network_stability_model"
 
 _HEADS = [
     {
-        "id": RISK_MODEL_ID, "name": "Utility Payment Risk Model",
+        "id": RISK_MODEL_ID, "name": "UPI Transaction Risk Model",
         "target": RISK_TARGET, "kind": "classifier", "unit": "",
-        "desc": "Classifies overall utility-bill payment risk (LOW/MEDIUM/HIGH) from "
-                "punctuality, missed payments, account diversity, recurring share and "
-                "statement tenure combined.",
+        "desc": "Classifies overall UPI transaction risk (LOW/MEDIUM/HIGH) from failed-payment "
+                "rate, high-risk-MCC spend share, payee-network thinness and statement tenure combined.",
     },
     {
-        "id": DISCIPLINE_MODEL_ID, "name": "Payment Discipline Score",
-        "target": DISCIPLINE_TARGET, "kind": "regressor", "unit": "score",
-        "desc": "Predicts a 0-100 payment-discipline score from on-time ratio and "
-                "missed-payment count alone — how consistently bills get paid on time.",
+        "id": RELIABILITY_MODEL_ID, "name": "Payment Reliability Score",
+        "target": RELIABILITY_TARGET, "kind": "regressor", "unit": "score",
+        "desc": "Predicts a 0-100 payment-reliability score from the success/failed transaction "
+                "ratio alone — how consistently the applicant's UPI payments actually go through.",
     },
     {
-        "id": BEHAVIOUR_MODEL_ID, "name": "Bill Payment Behaviour Model",
+        "id": BEHAVIOUR_MODEL_ID, "name": "Spend Behaviour Model",
         "target": BEHAVIOUR_TARGET, "kind": "classifier", "unit": "",
-        "desc": "Classifies payment cadence as REGULAR (recurring, on-schedule bill "
-                "payments) vs IRREGULAR (one-off / sporadic activity), independent of "
-                "whether those payments were on time.",
+        "desc": "Classifies spend cadence as REGULAR (recurring payees, steady daily transaction "
+                "rate) vs IRREGULAR (sporadic, one-off), independent of payment reliability or risk.",
     },
     {
-        "id": STABILITY_MODEL_ID, "name": "Utility Expense Stability Model",
+        "id": STABILITY_MODEL_ID, "name": "Network Stability Score",
         "target": STABILITY_TARGET, "kind": "regressor", "unit": "score",
-        "desc": "Predicts a 0-100 stability score from utility-account diversity and "
-                "statement tenure — how established the applicant's utility footprint is.",
+        "desc": "Predicts a 0-100 stability score from payee/payer network diversity and statement "
+                "tenure — how established the applicant's UPI footprint is.",
     },
 ]
 _HEAD_BY_ID = {h["id"]: h for h in _HEADS}
@@ -120,109 +117,104 @@ def _compute_targets(df: pd.DataFrame) -> pd.DataFrame:
     docstring for what each head weights and why. Recomputed fresh on every
     load (never trusted from a stored column) so an improved formula applies
     retroactively to the whole corpus, not just new rows."""
-    on_time = pd.to_numeric(df["on_time_payment_ratio"], errors="coerce").fillna(0.5).clip(0, 1)
-    missed = pd.to_numeric(df["missed_payment_count"], errors="coerce").fillna(0).clip(lower=0)
-    accounts = pd.to_numeric(df["utility_accounts"], errors="coerce").fillna(0)
-    recurring = pd.to_numeric(df["recurring_type_count"], errors="coerce").fillna(0)
+    failed = pd.to_numeric(df["failed_ratio"], errors="coerce").fillna(0).clip(0, 1)
+    success = pd.to_numeric(df["success_ratio"], errors="coerce").fillna(1).clip(0, 1)
+    high_risk = pd.to_numeric(df["high_risk_mcc_spend_pct"], errors="coerce").fillna(0).clip(0, 100)
+    payees = pd.to_numeric(df["unique_payees"], errors="coerce").fillna(0)
+    payers = pd.to_numeric(df["unique_payers"], errors="coerce").fillna(0)
+    recurring = pd.to_numeric(df["recurring_payee_count"], errors="coerce").fillna(0)
     span = pd.to_numeric(df["span_months"], errors="coerce").fillna(1).clip(lower=1)
-    payments = pd.to_numeric(df["payments_count"], errors="coerce").fillna(0)
+    daily_avg = pd.to_numeric(df["daily_avg_transactions"], errors="coerce").fillna(0)
 
-    recurring_share = (recurring / accounts.clip(lower=1)).clip(0, 1)
+    recurring_share = (recurring / payees.clip(lower=1)).clip(0, 1)
 
-    # 1. Risk — composite of all five signals (deliberately uses most of
-    # FEATURES: leaving one out entirely invites the model to fit noise on it).
+    # 1. Risk — composite (deliberately uses most of FEATURES: leaving one out
+    # entirely invites the model to fit noise on it).
     risk = (
-        0.35 * (1 - on_time)
-        + 0.25 * (missed / 5).clip(0, 1)
-        + 0.15 * (accounts < 2).astype(float)
-        + 0.15 * (1 - recurring_share)
-        + 0.10 * (span < 3).astype(float)
+        0.30 * failed
+        + 0.30 * (high_risk / 100)
+        + 0.20 * (payees < 2).astype(float)
+        + 0.20 * (span < 3).astype(float)
     ).clip(0, 1)
     risk_band = np.where(risk < 0.25, 0, np.where(risk < 0.55, 1, 2))
 
-    # 2. Discipline — punctuality only.
-    discipline = (
-        100 - (0.7 * (1 - on_time) + 0.3 * (missed / 5).clip(0, 1)) * 100
-    ).clip(0, 100)
+    # 2. Reliability — success/failed ratio only.
+    reliability = (success * 100 - failed * 30).clip(0, 100)
 
-    # 3. Behaviour — recurring share + whether payment count matches the
-    # cadence you'd expect from that many recurring accounts over the span,
-    # nothing about on-time-ness.
-    expected_cadence = (span * recurring.clip(lower=1)).clip(lower=1)
-    cadence_ratio = (payments / expected_cadence).clip(0, 2)
-    is_regular = ((recurring_share >= 0.5) & (cadence_ratio >= 0.5)).astype(int)
+    # 3. Behaviour — recurring-payee share + a baseline daily cadence, nothing
+    # about payment success or MCC risk.
+    is_regular = ((recurring_share >= 0.4) & (daily_avg >= 0.1)).astype(int)
 
-    # 4. Stability — account diversity + tenure only.
+    # 4. Stability — network diversity + tenure only.
     stability = (
-        100 * (0.5 * accounts.clip(upper=4) / 4
-               + 0.3 * span.clip(upper=12) / 12
-               + 0.2 * recurring_share)
+        100 * (0.35 * (payees + payers).clip(upper=20) / 20
+               + 0.35 * span.clip(upper=12) / 12
+               + 0.30 * recurring_share)
     ).clip(0, 100)
 
     return pd.DataFrame({
         RISK_TARGET: [RISK_ORDER[b] for b in risk_band],
-        DISCIPLINE_TARGET: discipline.round(1).to_numpy(),
+        RELIABILITY_TARGET: reliability.round(1).to_numpy(),
         BEHAVIOUR_TARGET: np.where(is_regular == 1, "REGULAR", "IRREGULAR"),
         STABILITY_TARGET: stability.round(1).to_numpy(),
     })
 
 
-_UTILITY_FLAGS = ["has_electricity", "has_water", "has_gas", "has_broadband", "has_mobile_dth"]
-
-
-def _shuffled(rng, items: list) -> list:
-    """Fisher-Yates using the app's own seeded RNG (no numpy dependency here)."""
-    out = list(items)
-    for i in range(len(out) - 1, 0, -1):
-        j = rand_int(rng, 0, i)
-        out[i], out[j] = out[j], out[i]
-    return out
-
-
 def _synthetic_bootstrap(n: int = 800, seed: int = 42) -> pd.DataFrame:
     """Synthetic starting corpus — clearly labelled as such, same role as
-    app.aa.model's synthetic feature matrix. Real uploads accumulate into
-    corpus.csv alongside this and eventually dominate the training mix.
+    app.bbps.model's / app.aa.model's synthetic feature matrix. Real uploads
+    accumulate into corpus.csv alongside this and eventually dominate the
+    training mix.
 
     Rows are built the way feature_vector_from_analysis() actually derives
-    them from a real statement — utility_accounts equals the count of has_X
-    flags set (not sampled independently of them), payments/missed counts
-    scale with span_months and how many utilities are recurring, and a more
-    disciplined payer (higher on-time ratio) is more likely to have more of
-    their utilities on a recurring cadence. Generating features independently
-    of each other, like a first pass of this did, puts most rows in a region
-    of feature space no real applicant's data ever lands in — the trained
-    model then generalizes poorly to genuine uploads even with a near-perfect
-    CV score on the synthetic set itself."""
+    them from a real file — recurring_payee_count never exceeds
+    unique_payees, p2p_ratio + p2m_ratio == 1, daily_avg_transactions is
+    derived from total_transactions and span_months rather than sampled
+    independently. Generating features independently of each other puts most
+    rows in a region of feature space no real applicant's data ever lands
+    in — see app.bbps.model's docstring for why that generalizes poorly."""
     rng = create_rng(seed)
     rows = []
     for _ in range(n):
         span = rand_int(rng, 1, 12)
-        accounts = rand_int(rng, 0, 5)
-        chosen = set(_shuffled(rng, range(len(_UTILITY_FLAGS)))[:accounts])
-        flags = {f: (1 if i in chosen else 0) for i, f in enumerate(_UTILITY_FLAGS)}
+        total = rand_int(rng, 5, 400)
+        p2p_share = rand_range(rng, 0.05, 0.6)
+        p2p_count = round(total * p2p_share)
+        p2m_count = total - p2p_count
+        p2p_ratio = round(p2p_count / total, 4) if total else 0.0
+        p2m_ratio = round(1 - p2p_ratio, 4)
 
-        on_time = rand_range(rng, 0.2, 1.0)
-        recurring = 0
-        for _t in range(accounts):
-            if rand_range(rng, 0, 1) < on_time:
-                recurring += 1
-        missed = 0
-        for _t in range(recurring * span):
-            if rand_range(rng, 0, 1) > on_time:
-                missed += 1
-        one_off = accounts - recurring
-        payments = recurring * span + one_off
+        success = rand_range(rng, 0.75, 1.0)
+        failed = rand_range(rng, 0.0, max(0.0, 1.0 - success))
+
+        unique_payees = rand_int(rng, 0, max(0, min(p2m_count, 15))) if p2m_count > 0 else 0
+        unique_payers = rand_int(rng, 0, max(0, min(p2p_count, 8))) if p2p_count > 0 else 0
+        recurring = rand_int(rng, 0, unique_payees) if unique_payees > 0 else 0
+
+        daily_avg = round(total / max(1, span * 30), 3)
+        weekend_pct = round(rand_range(rng, 0, 60), 1)
+        avg_ticket = round(rand_range(rng, 50, 5000), 2)
+        is_risky_profile = rand_range(rng, 0, 1) < 0.15
+        high_risk_pct = round(rand_range(rng, 10, 45) if is_risky_profile else rand_range(rng, 0, 5), 1)
+        p2p_debit_vel = round(rand_range(rng, 0, 15000), 2)
+        p2p_credit_vel = round(rand_range(rng, 0, 20000), 2)
 
         rows.append({
-            "utility_accounts": accounts,
-            "payments_count": payments,
+            "total_transactions": total,
             "span_months": span,
-            "on_time_payment_ratio": round(on_time, 3),
-            "missed_payment_count": missed,
-            "average_bill_amount": round(rand_range(rng, 150, 15000), 2),
-            **flags,
-            "recurring_type_count": recurring,
+            "p2p_ratio": p2p_ratio,
+            "p2m_ratio": p2m_ratio,
+            "success_ratio": round(success, 4),
+            "failed_ratio": round(failed, 4),
+            "unique_payees": unique_payees,
+            "unique_payers": unique_payers,
+            "recurring_payee_count": recurring,
+            "daily_avg_transactions": daily_avg,
+            "weekend_spend_pct": weekend_pct,
+            "avg_ticket_size": avg_ticket,
+            "high_risk_mcc_spend_pct": high_risk_pct,
+            "p2p_debit_velocity": p2p_debit_vel,
+            "p2p_credit_velocity": p2p_credit_vel,
         })
     return pd.DataFrame(rows)
 
@@ -233,7 +225,7 @@ def load_dataset() -> pd.DataFrame:
         try:
             frames.append(pd.read_csv(_CORPUS_CSV)[FEATURES])
         except (OSError, ValueError, pd.errors.ParserError, KeyError) as exc:
-            logger.warning("Could not read BBPS corpus (%s) — bootstrap only.", exc)
+            logger.warning("Could not read UPI corpus (%s) — bootstrap only.", exc)
     df = pd.concat(frames, ignore_index=True)
     return pd.concat([df, _compute_targets(df)], axis=1)
 
@@ -251,77 +243,6 @@ def append_to_corpus(row: dict) -> int:
     combined = pd.concat([existing, df], ignore_index=True) if existing is not None else df
     combined.to_csv(_CORPUS_CSV, index=False)
     return len(combined)
-
-
-# ── bulk per-customer CSV ingestion (a different real-data shape) ──────────
-# Some real BBPS data doesn't arrive as a transaction-level bank statement —
-# it arrives as an already-aggregated per-customer table (one row per
-# customer, a handful of behaviour columns already computed upstream).
-# `/pipeline/uploads` can't parse that shape (it expects real transaction
-# rows to derive features FROM), so it needs its own ingestion path here.
-
-_BULK_COLUMN_MAP = {
-    "utility_accounts": "utility_accounts",
-    "payments_last_12m": "payments_count",
-    "on_time_payment_ratio": "on_time_payment_ratio",
-    "missed_payment_count": "missed_payment_count",
-    "average_bill_amount": "average_bill_amount",
-}
-# "payments_last_12m" documents its own observation window — this is read
-# off the column's own name, not invented.
-_BULK_ASSUMED_SPAN_MONTHS = 12
-# Genuinely unknowable from a per-customer aggregate with no per-utility-type
-# breakdown (there's no way to tell if a customer's `utility_accounts` count
-# includes electricity, water, etc., or whether any of them are recurring).
-# Mean-imputed from the current corpus rather than asserted as a specific
-# true/false claim — the same convention _predict_heads already uses for a
-# feature missing at prediction time (see its `means.get(c, 0.0)` fallback).
-_BULK_IMPUTED_COLUMNS = [
-    "has_electricity", "has_water", "has_gas", "has_broadband",
-    "has_mobile_dth", "recurring_type_count",
-]
-
-
-def ingest_bulk_csv(raw: bytes) -> dict:
-    """Ingest a bulk per-customer feature CSV — e.g.
-    DS003_BBPS_utility_payment_history.csv: customer_id + utility_accounts +
-    payments_last_12m + on_time_payment_ratio + missed_payment_count +
-    average_bill_amount, already computed upstream, one row per customer.
-    Everything this schema provides is used as real data; see
-    _BULK_ASSUMED_SPAN_MONTHS / _BULK_IMPUTED_COLUMNS above for the two
-    documented gaps and how they're honestly handled (never fabricated)."""
-    import io
-
-    df = pd.read_csv(io.BytesIO(raw))
-    df.columns = [str(c).strip().lower().replace(" ", "_") for c in df.columns]
-
-    missing = [c for c in _BULK_COLUMN_MAP if c not in df.columns]
-    if missing:
-        raise ValueError(f"Bulk BBPS CSV is missing column(s): {', '.join(missing)}.")
-
-    base = load_dataset()
-    impute_means = {c: float(base[c].mean()) for c in _BULK_IMPUTED_COLUMNS}
-
-    out = pd.DataFrame()
-    for src_col, dst_col in _BULK_COLUMN_MAP.items():
-        out[dst_col] = pd.to_numeric(df[src_col], errors="coerce")
-    out["span_months"] = _BULK_ASSUMED_SPAN_MONTHS
-    for c in _BULK_IMPUTED_COLUMNS:
-        out[c] = impute_means[c]
-
-    before = len(out)
-    out = out.dropna(subset=["utility_accounts", "payments_count", "on_time_payment_ratio"])
-    out = out[FEATURES]
-
-    _MODEL_DIR.mkdir(parents=True, exist_ok=True)
-    existing = pd.read_csv(_CORPUS_CSV)[FEATURES] if _CORPUS_CSV.exists() else None
-    combined = pd.concat([existing, out], ignore_index=True) if existing is not None else out
-    combined.to_csv(_CORPUS_CSV, index=False)
-    return {
-        "added": int(len(out)),
-        "skippedInvalidRows": int(before - len(out)),
-        "total": int(len(combined)),
-    }
 
 
 # ── training ─────────────────────────────────────────────────────────────
@@ -363,7 +284,7 @@ def _train_one_head(df: pd.DataFrame, X: pd.DataFrame, spec: dict, Xv: np.ndarra
                      scaler: StandardScaler, feat: list[str], algorithm: str) -> dict:
     """Real 3-fold CV + final fit for one head. All four heads share the same
     feature matrix (Xv/scaler) — only the target column differs. Also builds
-    `evalMetrics`/`cvFolds` in the same shape app.gst.model._train_one_head
+    `evalMetrics`/`cvFolds` in the same shape app.bbps.model._train_one_head
     produces, so this head plugs straight into the shared Model Evaluation
     panel on the Model Hub page."""
     eval_metrics: dict | None = None
@@ -484,7 +405,7 @@ def train(algorithm: str = "gradient_boosting") -> dict:
     global _cache
     df = load_dataset()
     if len(df) < 50:
-        raise ValueError(f"BBPS dataset needs >= 50 rows (have {len(df)}).")
+        raise ValueError(f"UPI dataset needs >= 50 rows (have {len(df)}).")
 
     X = _feature_frame(df)
     feat = list(X.columns)
@@ -497,7 +418,7 @@ def train(algorithm: str = "gradient_boosting") -> dict:
     stability_h = by_id[STABILITY_MODEL_ID]
 
     # Back-compat top-level metrics (score = Stability head, flag = Risk head)
-    # — what the Model Hub card / registry table already renders.
+    # — what the Model Hub card / registry table renders.
     metrics = {
         "scoreR2": stability_h["metrics"].get("r2"),
         "scoreMae": stability_h["metrics"].get("mae"),
@@ -508,7 +429,7 @@ def train(algorithm: str = "gradient_boosting") -> dict:
     reg_json = _read_registry()
     version = max((v["version"] for v in reg_json["versions"]), default=0) + 1
     _MODEL_DIR.mkdir(parents=True, exist_ok=True)
-    path = _MODEL_DIR / f"bbps_model_v{version}.joblib"
+    path = _MODEL_DIR / f"upi_model_v{version}.joblib"
     import joblib
     artifact = {
         "scaler": stability_h["scaler"], "regressor": stability_h["est"], "classifier": risk_h["est"],
@@ -545,7 +466,7 @@ def train(algorithm: str = "gradient_boosting") -> dict:
     reg_json["active"] = version
     _write_registry(reg_json)
     _cache = {"artifact": artifact, "meta": meta}
-    logger.info("BBPS model v%d — %d rows, 4 heads: %s",
+    logger.info("UPI model v%d — %d rows, 4 heads: %s",
                 version, len(df), {h["id"]: h["accuracyLabel"] for h in heads})
     return {
         "version": version, "nSamples": int(len(df)), "features": len(feat),
@@ -575,7 +496,7 @@ def _load_active() -> dict | None:
         import joblib
         artifact = joblib.load(path)
     except (serialization.ModelIntegrityError, OSError, ValueError) as exc:
-        logger.error("REFUSING to load BBPS model v%s — %s", meta.get("version"), exc)
+        logger.error("REFUSING to load UPI model v%s — %s", meta.get("version"), exc)
         return None
     _cache = {"artifact": artifact, "meta": meta}
     return _cache
@@ -612,10 +533,11 @@ def _predict_heads(record: dict, loaded: dict) -> dict:
             if hasattr(est, "predict_proba") and classes:
                 p = est.predict_proba(xs)[0]
                 # est.classes_ may be a STRICT SUBSET of `classes` — a weak-
-                # supervision band the training data never produced leaves
-                # the classifier never having seen it, so p has fewer
-                # columns than len(classes). Map by the model's own
-                # seen-class indices, zero-filling whatever it never saw.
+                # supervision band the training data never produced (e.g. no
+                # row ever hit HIGH) leaves the classifier never having seen
+                # it, so p has fewer columns than len(classes). Map by the
+                # model's own seen-class indices instead of assuming full
+                # coverage, and zero-fill whatever it never saw.
                 seen = getattr(est, "classes_", range(len(p)))
                 proba = {classes[int(idx)]: round(float(pv), 4)
                          for idx, pv in zip(seen, p) if int(idx) < len(classes)}
@@ -633,7 +555,7 @@ def _predict_heads(record: dict, loaded: dict) -> dict:
 def predict(record: dict) -> dict:
     loaded = _load_active()
     if not loaded:
-        return {"available": False, "message": "BBPS model not trained yet — call POST /api/bbps/train."}
+        return {"available": False, "message": "UPI model not trained yet — call POST /api/upi/train."}
     meta = loaded["meta"]
     heads = _predict_heads(record, loaded)
 
@@ -683,8 +605,7 @@ def _active_version(reg: dict | None = None) -> dict | None:
 
 def head_evaluations() -> dict:
     """{head_id: {name, kind, evalMetrics, cvFolds}} for the active bundle —
-    feeds the Model Evaluation panel's BBPS rows and per-head detail. Only
-    heads that actually cross-validated are returned."""
+    feeds the Model Evaluation panel's UPI rows and per-head detail."""
     v = _active_version()
     if not v:
         return {}
@@ -711,7 +632,7 @@ def eval_context() -> dict:
 def reevaluate() -> dict:
     """Recompute every head's CV metrics on the current corpus for the ACTIVE
     bundle's algorithm and write them back into registry.json in place — no new
-    version, no re-signing of the artifact. Mirrors app.gst.model.reevaluate."""
+    version, no re-signing of the artifact. Mirrors app.bbps.model.reevaluate."""
     reg = _read_registry()
     v = _active_version(reg)
     if not v:
@@ -755,7 +676,7 @@ def list_versions() -> list[dict]:
 
 
 def deploy_state() -> dict:
-    """{head_id: bool} — whether each BBPS head's output is live. Default: all on."""
+    """{head_id: bool} — whether each UPI head's output is live. Default: all on."""
     st = {hid: True for hid in HEAD_IDS}
     if _DEPLOY_JSON.exists():
         try:
@@ -768,7 +689,7 @@ def deploy_state() -> dict:
 
 def set_deployed(head_id: str, value: bool) -> dict:
     if head_id not in HEAD_IDS:
-        raise ValueError(f"Unknown BBPS model '{head_id}'.")
+        raise ValueError(f"Unknown UPI model '{head_id}'.")
     st = deploy_state()
     st[head_id] = bool(value)
     _MODEL_DIR.mkdir(parents=True, exist_ok=True)

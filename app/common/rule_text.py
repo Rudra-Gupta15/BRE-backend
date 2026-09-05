@@ -324,6 +324,25 @@ RULE_DESCRIPTIONS: dict[str, str] = {
     "Statement Span Sufficiency Rule": "Requires enough calendar months in the statement to judge payment regularity at all.",
     "Utility Payment Frequency Rule": "Total BBPS/utility payments found across the statement period.",
     "Final BBPS Underwriting Signal Rule": "Rolls up punctuality, diversity and missed payments into the BBPS utility-stability signal.",
+
+    # UPI Transaction Data Enrichment — one person's UPI transaction log
+    # (see app.upi.analysis).
+    "UPI Data Presence Rule": "Confirms at least one readable UPI transaction was found in the file.",
+    "Transaction Volume Rule": "Checks the applicant has enough UPI transactions to judge behaviour from.",
+    "Payment Success Rate Rule": "Share of transactions that actually succeeded, not failed or stayed pending.",
+    "Failed Transaction Rule": "Flags an unusually high count of failed UPI payments.",
+    "P2P Counterparty Diversity Rule": "Counts distinct people the applicant has received money from via UPI.",
+    "P2M Merchant Diversity Rule": "Counts distinct merchants/QR codes the applicant has paid via UPI.",
+    "Recurring Payee Rule": "Flags merchants or people paid across 2+ calendar months — a subscription or regular relationship, not a one-off.",
+    "High-Risk MCC Exposure Rule": "Share of merchant spend on higher-risk categories (gambling, quasi-cash, pawn shops).",
+    "Weekend Spend Concentration Rule": "How much of merchant (P2M) spend falls on a weekend vs. spread through the week.",
+    "Average Ticket Size Rule": "The average amount per UPI transaction across the file.",
+    "P2P Lending Velocity Rule": "How much money the applicant sends to individuals per month via UPI — an informal-lending signal.",
+    "P2P Borrowing Velocity Rule": "How much money the applicant receives from individuals per month via UPI — an informal-borrowing signal.",
+    "Daily Transaction Consistency Rule": "Average UPI transactions per day across the file's date span.",
+    "Statement Span Sufficiency Rule": "Requires enough calendar months in the file to judge UPI behaviour regularity at all.",
+    "Network Stability Rule": "Rolls up payee/payer diversity and recurring relationships into how established the applicant's UPI network is.",
+    "Final UPI Underwriting Signal Rule": "Rolls up reliability, risk and network signals into the overall UPI underwriting signal.",
 }
 
 

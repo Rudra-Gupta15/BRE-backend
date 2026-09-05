@@ -15,7 +15,7 @@ from app.aa.scoring import (
     compute_real_feature_vector,
 )
 from app.aa.product_state import bre_product_state
-from app.aa.product_source_state import product_source_rule_state
+from app.common.product_source_state import product_source_rule_state
 from app.common.state.rule_catalog import rule_catalog_state
 from app.common.state.source_rules import data_source_rule_state
 from app.common.state.session import session_state

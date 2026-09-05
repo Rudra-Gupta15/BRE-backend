@@ -1,14 +1,18 @@
 # Per-(loan-product × data-source) BRE rule enable/disable state.
 # Settings › BRE Rule Setting › [product] › [data source] → rule checklist.
-# The rule catalogue is the data-source catalogue (data_source_rules.py); the
+# The rule catalogue is the data-source catalogue (source_rules.py); the
 # enabled map is tracked independently for every product. Defaults every rule ON.
 # Persisted to a cache file that survives /reset and a restart.
+#
+# Lives in app.common (not app.aa) because every data source's rules.py
+# (aa/gst/bbps/upi) reads its own enabled map from here — it's the shared
+# per-product × per-source toggle state, not owned by any one domain.
 
 import json
 import logging
 from pathlib import Path
 
-from app.aa.product_rules import PRODUCT_RULE_IDS
+from app.common.products import PRODUCT_IDS
 from app.common.source_rules import DATA_SOURCE_RULES
 
 logger = logging.getLogger(__name__)
@@ -22,7 +26,7 @@ def _default() -> dict[str, dict[str, dict[str, bool]]]:
             sid: {r["id"]: True for r in rules}
             for sid, rules in DATA_SOURCE_RULES.items()
         }
-        for pid in PRODUCT_RULE_IDS
+        for pid in PRODUCT_IDS
     }
 
 
@@ -30,7 +34,7 @@ def _default_active() -> dict[str, dict[str, bool]]:
     # A data source is "active" for a product if it has a rule catalogue.
     return {
         pid: {sid: (sid in DATA_SOURCE_RULES) for sid in DATA_SOURCE_RULES}
-        for pid in PRODUCT_RULE_IDS
+        for pid in PRODUCT_IDS
     }
 
 

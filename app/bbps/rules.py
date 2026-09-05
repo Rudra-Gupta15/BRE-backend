@@ -156,10 +156,10 @@ def evaluate(analysis_result: dict, heads: dict, *, product_id: str | None = Non
     """Run the 16 bbps_utility rules against one scored statement, respecting
     per-product rule enable/disable toggles (Settings page). Twin of
     app.gst.rules.evaluate."""
-    from app.aa.product_source_state import product_source_rule_state
-    from app.aa.product_state import bre_product_state
+    from app.common.product_source_state import product_source_rule_state
+    from app.common.active_product import active_product_state
 
-    product_id = product_id or bre_product_state.active_product
+    product_id = product_id or active_product_state.active_product
     enabled_map = product_source_rule_state.for_ps(product_id, "bbps_utility") if product_id else {}
     lid = _label_to_id()
 

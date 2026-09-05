@@ -15,7 +15,7 @@ from __future__ import annotations
 import re
 from collections import defaultdict
 
-from app.aa.scoring import _parse_tx_date
+from app.common.dates import parse_tx_date as _parse_tx_date
 
 _UTILITY_TYPES: dict[str, re.Pattern] = {
     "ELECTRICITY": re.compile(r"electric|power\s*bill|discom|state\s*electricity|\belectricity\b", re.I),

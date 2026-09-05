@@ -2,6 +2,8 @@
 pipeline. Bank statements parse + score here; sourceId=="gst_data" delegates
 to app.gst.service / app.gst.pipeline. sourceId=="bbps_utility" parses as a
 normal statement here too, then hands the transactions to app.bbps.analyze_bbps.
+sourceId=="upi_enrichment" delegates to app.upi.service (its own dedicated
+parser, unlike BBPS — see app.upi's package docstring for why).
 """
 
 import logging
@@ -89,6 +91,63 @@ def _ingest_gst(source_id: str, buf: bytes, file_name: str, analysis: dict) -> d
         "statementId": statement_id,
     }
     return {"meta": meta, "statement": parsed, "lineage": lin, "warnings": res["warnings"]}
+
+
+def _ingest_upi(source_id: str, buf: bytes, file_name: str, analysis: dict) -> dict:
+    """One UPI file → parsed by the UPI parser, scored by the UPI model, and
+    appended to the UPI training corpus. Twin of _ingest_gst."""
+    from app.upi import service as upi_service
+
+    try:
+        res = upi_service.ingest_upi_file(buf, file_name)
+    except ValueError as exc:
+        raise HTTPException(422, f"UPI file rejected ({file_name}): {exc}") from exc
+
+    analysis["cleanlinessPercent"] = res["completeness"]
+
+    upi_summary = {
+        "available": res["analysis"].get("available", False),
+        "transactionCount": res["transactionCount"],
+        "spanMonths": res["analysis"].get("spanMonths"),
+        "totalTransactions": res["analysis"].get("totalTransactions"),
+        "successRatio": res["analysis"].get("successRatio"),
+        "p2pRatio": res["analysis"].get("p2pRatio"),
+        "p2mRatio": res["analysis"].get("p2mRatio"),
+        "uniquePayees": res["analysis"].get("uniquePayees"),
+        "uniquePayers": res["analysis"].get("uniquePayers"),
+        "byMcc": res["analysis"].get("byMcc", []),
+        "message": res["analysis"].get("message"),
+        "rules": res["rules"],
+        "model": res["prediction"],
+        "completeness": res["completeness"],
+        "corpusRows": res["corpusRows"],
+        # The full real transaction list — needed later by app.upi.patterns
+        # for corpus-wide fraud/anomaly scanning and by /upi/score-testing.
+        "rawTransactions": res["rawTransactions"],
+    }
+    parsed = {
+        "transactions": [],
+        "summary": {"transactionCount": 0, "upiTransactionCount": res["transactionCount"], "kind": "upi"},
+        "upi": upi_summary,
+    }
+
+    lin = {
+        "file_sha256": lineage.file_digest(buf),
+        "parse_confidence": (res["completeness"] / 100.0),
+        "parse_warnings": None,
+        **lineage.parser_identity(),
+    }
+    statement_id = save_statement(source_id, analysis, parsed, lineage=lin)
+
+    meta = {
+        **analysis,
+        "autoFilled": False,
+        "statementSummary": parsed["summary"],
+        "transactionsParsed": 0,
+        "upi": upi_summary,
+        "statementId": statement_id,
+    }
+    return {"meta": meta, "statement": parsed, "lineage": lin, "warnings": []}
 
 
 async def _ingest_gst_folder(source_id: str, incoming: list[UploadFile]):
@@ -245,6 +304,12 @@ async def _ingest_one(source_id: str, file: UploadFile) -> dict:
     # statement pipeline. These files carry GST return fields, not transactions.
     if source_id == "gst_data":
         return _ingest_gst(source_id, buf, file_name, analysis)
+
+    # UPI Transaction Data Enrichment → its own dedicated parser + model, not
+    # the bank statement pipeline. These files carry VPA/MCC/mode fields a
+    # bank narration can't express.
+    if source_id == "upi_enrichment":
+        return _ingest_upi(source_id, buf, file_name, analysis)
 
     try:
         parsed = await parse_statement(buf, file_name)

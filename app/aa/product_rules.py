@@ -345,12 +345,10 @@ PRODUCT_RULE_IDS: dict[str, list[str]] = {
     ],
 }
 
-PRODUCT_NAMES = {
-    "lap_sbl": "LAP / SBL",
-    "machine": "Machine Loan",
-    "vehicle": "Vehicle Loan",
-    "msme": "MSME Loan",
-}
+# Canonical product-id -> display-name map now lives in app.common.products
+# (every data source's rules.py needs the id list, not just AA) — re-exported
+# here so existing AA imports of PRODUCT_NAMES keep working unchanged.
+from app.common.products import PRODUCT_NAMES  # noqa: E402
 
 
 def rule_meta(rid: str) -> dict | None:
